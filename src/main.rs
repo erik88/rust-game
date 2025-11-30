@@ -1,0 +1,102 @@
+mod input;
+mod player;
+mod tilemap;
+
+use sdl2::image::{InitFlag, LoadTexture};
+use std::time::{Duration, Instant};
+
+use crate::input::InputHandler;
+use crate::player::Player;
+use crate::tilemap::TileMap;
+
+fn main() -> Result<(), String> {
+    // Initialize SDL2
+    let sdl_context = sdl2::init()?;
+    let video_subsystem = sdl_context.video()?;
+
+    // Initialize SDL2_image with PNG support
+    let _image_context = sdl2::image::init(InitFlag::PNG)?;
+
+    // Create a window
+    let window = video_subsystem
+        .window("Platform Game", 800, 600)
+        .position_centered()
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    // Create a canvas for rendering
+    let mut canvas = window
+        .into_canvas()
+        .accelerated()
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    // Get the texture creator
+    let texture_creator = canvas.texture_creator();
+
+    // Load textures
+    let character_texture = texture_creator.load_texture("character.png")?;
+    let tilemap_texture = texture_creator.load_texture("tilemap.png")?;
+
+    // Create game objects
+    let mut player = Player::new(100.0, 300.0);
+    let mut tilemap = TileMap::new();
+
+    let mut event_pump = sdl_context.event_pump()?;
+    let mut input_handler = InputHandler::new();
+
+    // Target 60 FPS
+    let target_frame_time = Duration::from_micros(16667); // ~60 Hz
+    let mut last_frame_time = Instant::now();
+
+    'running: loop {
+        let frame_start = Instant::now();
+        let delta_time = frame_start.duration_since(last_frame_time).as_secs_f32();
+        last_frame_time = frame_start;
+
+        // Update input state
+        input_handler.update(&mut event_pump);
+
+        if input_handler.should_quit() {
+            break 'running;
+        }
+
+        // Update tilemap (for disappearing tiles)
+        tilemap.update(delta_time);
+
+        // Update player
+        player.update(input_handler.state(), &mut tilemap, delta_time);
+
+        // Check if player fell off the screen or touched deadly tile and reset if needed
+        if player.is_dead(600) || player.is_touching_deadly_tile(&tilemap) {
+            player.reset();
+            tilemap.reset();
+        }
+
+        // Camera follows player
+        let level_width = (tilemap.width as i32) * (tilemap.tile_size as i32);
+        let max_camera_x = (level_width - 800).max(0);
+        let camera_x = (player.x as i32 - 400).max(0).min(max_camera_x);
+
+        // Clear the canvas with sky blue background
+        canvas.set_draw_color(sdl2::pixels::Color::RGB(135, 206, 235));
+        canvas.clear();
+
+        // Render tilemap
+        tilemap.render(&mut canvas, &tilemap_texture, camera_x);
+
+        // Render player
+        player.render(&mut canvas, &character_texture, camera_x);
+
+        // Present the rendered frame
+        canvas.present();
+
+        // Sleep for remaining frame time to maintain 60 Hz
+        let frame_time = frame_start.elapsed();
+        if frame_time < target_frame_time {
+            std::thread::sleep(target_frame_time - frame_time);
+        }
+    }
+
+    Ok(())
+}
