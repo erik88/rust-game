@@ -1,6 +1,8 @@
 - [ ] Implement headless mode so it is easy to create and run test cases, especially so that AI Agents can queue inputs and test different kinds of input and interactions. 
 
-- [ ] When the player is pushed by a horizontally moving block, make sure that it does not change y-position (at the moment the player is being pushed up an entire tile).
+- [ ] Not possible to walk onto a downward facing platform
+
+- [ ] Not possible to walk while riding an upward facing plafrom
 
 - [ ] Directional blocks should be able to collide amongst themselves.
 

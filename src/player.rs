@@ -77,13 +77,55 @@ impl Player {
         };
         self.vel_y += current_gravity * delta_time;
 
-        // Move horizontally with collision
-        self.x += self.vel_x * delta_time;
-        self.resolve_x_collision(tilemap);
+        // Calculate potential new position
+        let mut new_x = self.x + self.vel_x * delta_time;
+        let mut new_y = self.y + self.vel_y * delta_time;
 
-        // Move vertically with collision
-        self.y += self.vel_y * delta_time;
-        self.resolve_y_collision(tilemap);
+        // Check and adjust horizontal movement
+        if self.check_collision_at(new_x, self.y, tilemap) {
+            // Collision detected - try to slide to the edge of the obstacle
+            new_x = self.resolve_x_position(new_x, tilemap);
+            self.vel_x = 0.0;
+        }
+
+        // Check and adjust vertical movement
+        if self.check_collision_at(new_x, new_y, tilemap) {
+            // Collision detected - try to slide to the edge of the obstacle
+            new_y = self.resolve_y_position(new_x, new_y, tilemap);
+            self.vel_y = 0.0;
+        }
+
+        // Apply the adjusted position
+        self.x = new_x;
+        self.y = new_y;
+
+        // Check if player is on ground (tiles)
+        self.on_ground = self.check_collision_at(self.x, self.y + 1.0, tilemap);
+
+        // Also check if standing on a platform
+        if !self.on_ground {
+            let player_left = self.x;
+            let player_right = self.x + self.width as f32;
+            let player_bottom = self.y + self.height as f32;
+
+            for platform in &tilemap.moving_platforms {
+                let platform_left = platform.x;
+                let platform_right = platform.x + tilemap.tile_size as f32;
+                let platform_top = platform.y;
+
+                // Check if player's feet are on top of the platform
+                // Use wider tolerance to catch player positioned slightly above platform
+                let feet_on_platform = player_bottom >= platform_top - 3.0
+                    && player_bottom <= platform_top + 2.0
+                    && player_right > platform_left
+                    && player_left < platform_right;
+
+                if feet_on_platform && self.vel_y >= 0.0 {
+                    self.on_ground = true;
+                    break;
+                }
+            }
+        }
 
         // Touch all tiles the player is currently overlapping
         self.touch_tiles(tilemap);
@@ -128,6 +170,113 @@ impl Player {
         }
     }
 
+    fn resolve_x_position(&self, target_x: f32, tilemap: &TileMap) -> f32 {
+        // Binary search to find the closest valid X position
+        let start_x = self.x;
+        let mut low = start_x.min(target_x);
+        let mut high = start_x.max(target_x);
+
+        // Use binary search to find the exact collision point
+        for _ in 0..10 {
+            let mid = (low + high) / 2.0;
+            if self.check_collision_at(mid, self.y, tilemap) {
+                if target_x > start_x {
+                    high = mid; // Moving right, collision ahead
+                } else {
+                    low = mid; // Moving left, collision ahead
+                }
+            } else {
+                if target_x > start_x {
+                    low = mid; // Moving right, no collision yet
+                } else {
+                    high = mid; // Moving left, no collision yet
+                }
+            }
+        }
+
+        // Return the safe position
+        if target_x > start_x {
+            low // Moving right, return leftmost safe position
+        } else {
+            high // Moving left, return rightmost safe position
+        }
+    }
+
+    fn resolve_y_position(&self, x: f32, target_y: f32, tilemap: &TileMap) -> f32 {
+        // Binary search to find the closest valid Y position
+        let start_y = self.y;
+        let mut low = start_y.min(target_y);
+        let mut high = start_y.max(target_y);
+
+        // Use binary search to find the exact collision point
+        for _ in 0..10 {
+            let mid = (low + high) / 2.0;
+            if self.check_collision_at(x, mid, tilemap) {
+                if target_y > start_y {
+                    high = mid; // Moving down, collision below
+                } else {
+                    low = mid; // Moving up, collision above
+                }
+            } else {
+                if target_y > start_y {
+                    low = mid; // Moving down, no collision yet
+                } else {
+                    high = mid; // Moving up, no collision yet
+                }
+            }
+        }
+
+        // Return the safe position
+        if target_y > start_y {
+            low // Moving down, return highest safe position
+        } else {
+            high // Moving up, return lowest safe position
+        }
+    }
+
+    fn check_collision_at(&self, x: f32, y: f32, tilemap: &TileMap) -> bool {
+        // Define the player's corners at the given position
+        let corners = [
+            (x, y),                                           // Top-left
+            (x + self.width as f32 - 1.0, y),                 // Top-right
+            (x, y + self.height as f32 - 1.0),                // Bottom-left
+            (x + self.width as f32 - 1.0, y + self.height as f32 - 1.0), // Bottom-right
+        ];
+
+        // Check if any corner is inside a solid tile
+        for &(corner_x, corner_y) in &corners {
+            let tile_x = (corner_x / tilemap.tile_size as f32).floor() as i32;
+            let tile_y = (corner_y / tilemap.tile_size as f32).floor() as i32;
+
+            if tilemap.is_solid(tile_x, tile_y) {
+                return true;
+            }
+        }
+
+        // Check collision with moving platforms (they are solid obstacles)
+        let player_left = x;
+        let player_right = x + self.width as f32;
+        let player_top = y;
+        let player_bottom = y + self.height as f32;
+
+        for platform in &tilemap.moving_platforms {
+            let platform_left = platform.x;
+            let platform_right = platform.x + tilemap.tile_size as f32;
+            let platform_top = platform.y;
+            let platform_bottom = platform.y + tilemap.tile_size as f32;
+
+            // Check if player overlaps platform
+            let overlaps_x = player_right > platform_left && player_left < platform_right;
+            let overlaps_y = player_bottom > platform_top && player_top < platform_bottom;
+
+            if overlaps_x && overlaps_y {
+                return true;
+            }
+        }
+
+        false
+    }
+
     fn touch_tiles(&self, tilemap: &mut TileMap) {
         let player_left = self.x as i32;
         let player_right = (self.x + self.width as f32) as i32;
@@ -151,20 +300,23 @@ impl Player {
     fn handle_platforms(&mut self, tilemap: &mut TileMap, delta_time: f32) {
         let player_left = self.x;
         let player_right = self.x + self.width as f32;
+        let player_top = self.y;
         let player_bottom = self.y + self.height as f32;
 
         // Check if player is standing on any platform
         let mut platform_to_activate: Option<(i32, i32)> = None;
         let mut platform_vel: Option<(f32, f32)> = None;
+        let mut platform_push: Option<f32> = None; // Horizontal push from platform beside player
 
         for platform in &tilemap.moving_platforms {
             let platform_left = platform.x;
             let platform_right = platform.x + tilemap.tile_size as f32;
             let platform_top = platform.y;
+            let platform_bottom = platform.y + tilemap.tile_size as f32;
 
             // Check if player's feet are touching the top of the platform
-            // Use a tighter tolerance to avoid sticking when jumping
-            let feet_touching = player_bottom >= platform_top
+            // Use wider tolerance to catch player positioned slightly above platform
+            let feet_touching = player_bottom >= platform_top - 3.0
                 && player_bottom <= platform_top + 2.0
                 && player_right > platform_left
                 && player_left < platform_right;
@@ -182,6 +334,23 @@ impl Player {
                 platform_vel = Some((platform.vel_x, platform.vel_y));
                 break;
             }
+
+            // Check if horizontally moving platform is beside the player and should push them
+            if platform.active && platform.vel_x.abs() > 0.01 {
+                // Check vertical alignment - player and platform must overlap vertically
+                let vertical_overlap = player_bottom > platform_top && player_top < platform_bottom;
+
+                if vertical_overlap {
+                    // Platform moving right, check if it's to the left of player
+                    if platform.vel_x > 0.0 && platform_right >= player_left - 2.0 && platform_right <= player_left + 2.0 {
+                        platform_push = Some(platform.vel_x);
+                    }
+                    // Platform moving left, check if it's to the right of player
+                    else if platform.vel_x < 0.0 && platform_left <= player_right + 2.0 && platform_left >= player_right - 2.0 {
+                        platform_push = Some(platform.vel_x);
+                    }
+                }
+            }
         }
 
         // Activate platform if needed (outside the loop to avoid borrow issues)
@@ -189,67 +358,42 @@ impl Player {
             tilemap.activate_platform(px, py);
         }
 
-        // Move player with platform, but check for collisions separately for X and Y
+        // Handle platform pushing from the side
+        if let Some(push_vel_x) = platform_push {
+            let move_x = push_vel_x * delta_time;
+            let new_x = self.x + move_x;
+            if self.check_collision_at(new_x, self.y, tilemap) {
+                // Platform is pushing player into obstacle - resolve to edge
+                self.x = self.resolve_x_position(new_x, tilemap);
+            } else {
+                self.x = new_x;
+            }
+        }
+
+        // Move player with platform - platform carries the player
         if let Some((vel_x, vel_y)) = platform_vel {
             let move_x = vel_x * delta_time;
             let move_y = vel_y * delta_time;
 
-            let old_x = self.x;
-            let old_y = self.y;
-
             // Try horizontal movement
             if move_x.abs() > 0.01 {
-                self.x += move_x;
-
-                // Check for collision after X movement
-                let mut x_collided = false;
-                let player_left = self.x as i32;
-                let player_right = (self.x + self.width as f32) as i32;
-                let player_top = self.y as i32;
-                let player_bottom = (self.y + self.height as f32) as i32;
-
-                for ty in (player_top / tilemap.tile_size as i32)..=((player_bottom - 1) / tilemap.tile_size as i32) {
-                    for tx in (player_left / tilemap.tile_size as i32)..=((player_right - 1) / tilemap.tile_size as i32) {
-                        if tilemap.is_solid(tx, ty) {
-                            x_collided = true;
-                            break;
-                        }
-                    }
-                    if x_collided {
-                        break;
-                    }
-                }
-
-                if x_collided {
-                    self.x = old_x; // Revert X movement
+                let new_x = self.x + move_x;
+                if self.check_collision_at(new_x, self.y, tilemap) {
+                    // Platform is pushing player into obstacle - resolve to edge
+                    self.x = self.resolve_x_position(new_x, tilemap);
+                } else {
+                    self.x = new_x;
                 }
             }
 
             // Try vertical movement
             if move_y.abs() > 0.01 {
-                self.y += move_y;
-
-                // Check for collision after Y movement
-                let mut y_collided = false;
-                let player_left = self.x as i32;
-                let player_right = (self.x + self.width as f32) as i32;
-                let player_top = self.y as i32;
-                let player_bottom = (self.y + self.height as f32) as i32;
-
-                for ty in (player_top / tilemap.tile_size as i32)..=((player_bottom - 1) / tilemap.tile_size as i32) {
-                    for tx in (player_left / tilemap.tile_size as i32)..=((player_right - 1) / tilemap.tile_size as i32) {
-                        if tilemap.is_solid(tx, ty) {
-                            y_collided = true;
-                            break;
-                        }
-                    }
-                    if y_collided {
-                        break;
-                    }
-                }
-
-                if y_collided {
-                    self.y = old_y; // Revert Y movement
+                let new_y = self.y + move_y;
+                if self.check_collision_at(self.x, new_y, tilemap) {
+                    // Platform is pushing player into obstacle - resolve to edge
+                    self.y = self.resolve_y_position(self.x, new_y, tilemap);
+                } else {
+                    self.y = new_y;
                 }
             }
         }
@@ -275,191 +419,6 @@ impl Player {
             }
         }
         false
-    }
-
-    fn resolve_x_collision(&mut self, tilemap: &TileMap) {
-        let player_left = self.x as i32;
-        let player_right = (self.x + self.width as f32) as i32;
-        let player_top = self.y as i32;
-        let player_bottom = (self.y + self.height as f32) as i32;
-
-        // Check tiles the player overlaps
-        let top_tile = (player_top as f32 / tilemap.tile_size as f32).floor() as i32;
-        let bottom_tile = ((player_bottom - 1) as f32 / tilemap.tile_size as f32).floor() as i32;
-        let left_tile = (player_left as f32 / tilemap.tile_size as f32).floor() as i32;
-        let right_tile = ((player_right - 1) as f32 / tilemap.tile_size as f32).floor() as i32;
-
-        let mut collision_resolved = false;
-        for ty in top_tile..=bottom_tile {
-            for tx in left_tile..=right_tile {
-                if tilemap.is_solid(tx, ty) {
-                    let tile_left = tx * tilemap.tile_size as i32;
-                    let tile_right = tile_left + tilemap.tile_size as i32;
-
-                    // Moving right
-                    if self.vel_x > 0.0 {
-                        self.x = tile_left as f32 - self.width as f32;
-                        self.vel_x = 0.0;
-                        collision_resolved = true;
-                        break;
-                    }
-                    // Moving left
-                    else if self.vel_x < 0.0 {
-                        self.x = tile_right as f32;
-                        self.vel_x = 0.0;
-                        collision_resolved = true;
-                        break;
-                    }
-                }
-            }
-            if collision_resolved {
-                break;
-            }
-        }
-
-        // Check collision with moving platforms
-        if !collision_resolved {
-            let player_left_f = self.x;
-            let player_right_f = self.x + self.width as f32;
-            let player_top_f = self.y;
-            let player_bottom_f = self.y + self.height as f32;
-
-            for platform in &tilemap.moving_platforms {
-                let platform_left = platform.x;
-                let platform_right = platform.x + tilemap.tile_size as f32;
-                let platform_top = platform.y;
-                let platform_bottom = platform.y + tilemap.tile_size as f32;
-
-                // Check if player overlaps platform horizontally and vertically
-                let overlaps_x = player_right_f > platform_left && player_left_f < platform_right;
-                let overlaps_y = player_bottom_f > platform_top && player_top_f < platform_bottom;
-
-                if overlaps_x && overlaps_y {
-                    // Moving right
-                    if self.vel_x > 0.0 {
-                        self.x = platform_left - self.width as f32;
-                        self.vel_x = 0.0;
-                        break;
-                    }
-                    // Moving left
-                    else if self.vel_x < 0.0 {
-                        self.x = platform_right;
-                        self.vel_x = 0.0;
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
-    fn resolve_y_collision(&mut self, tilemap: &TileMap) {
-        let player_left = self.x as i32;
-        let player_right = (self.x + self.width as f32) as i32;
-        let player_top = self.y as i32;
-        let player_bottom = (self.y + self.height as f32) as i32;
-
-        self.on_ground = false;
-
-        // Check tiles the player overlaps - use ceiling to include partial overlaps
-        let top_tile = (player_top as f32 / tilemap.tile_size as f32).floor() as i32;
-        let bottom_tile = ((player_bottom - 1) as f32 / tilemap.tile_size as f32).floor() as i32;
-        let left_tile = (player_left as f32 / tilemap.tile_size as f32).floor() as i32;
-        let right_tile = ((player_right - 1) as f32 / tilemap.tile_size as f32).floor() as i32;
-
-        let mut collision_resolved = false;
-        for ty in top_tile..=bottom_tile {
-            for tx in left_tile..=right_tile {
-                if tilemap.is_solid(tx, ty) {
-                    let tile_top = ty * tilemap.tile_size as i32;
-                    let tile_bottom = tile_top + tilemap.tile_size as i32;
-
-                    // Moving down or resting on ground
-                    if self.vel_y >= 0.0 {
-                        self.y = tile_top as f32 - self.height as f32;
-                        self.vel_y = 0.0;
-                        collision_resolved = true;
-                        break;
-                    }
-                    // Moving up
-                    else if self.vel_y < 0.0 {
-                        self.y = tile_bottom as f32;
-                        self.vel_y = 0.0;
-                        collision_resolved = true;
-                        break;
-                    }
-                }
-            }
-            if collision_resolved {
-                break;
-            }
-        }
-
-        // Check collision with moving platforms
-        if !collision_resolved {
-            let player_left_f = self.x;
-            let player_right_f = self.x + self.width as f32;
-            let player_top_f = self.y;
-            let player_bottom_f = self.y + self.height as f32;
-
-            for platform in &tilemap.moving_platforms {
-                let platform_left = platform.x;
-                let platform_right = platform.x + tilemap.tile_size as f32;
-                let platform_top = platform.y;
-                let platform_bottom = platform.y + tilemap.tile_size as f32;
-
-                // Check if player overlaps platform horizontally and vertically
-                let overlaps_x = player_right_f > platform_left && player_left_f < platform_right;
-                let overlaps_y = player_bottom_f > platform_top && player_top_f < platform_bottom;
-
-                if overlaps_x && overlaps_y {
-                    // Moving down
-                    if self.vel_y >= 0.0 {
-                        self.y = platform_top - self.height as f32;
-                        self.vel_y = 0.0;
-                        break;
-                    }
-                    // Moving up
-                    else if self.vel_y < 0.0 {
-                        self.y = platform_bottom;
-                        self.vel_y = 0.0;
-                        break;
-                    }
-                }
-            }
-        }
-
-        // Check if player is standing on ground (check tiles just below player's feet)
-        let feet_y = player_bottom;
-        let tile_below_y = (feet_y as f32 / tilemap.tile_size as f32).floor() as i32;
-
-        for tx in left_tile..=right_tile {
-            if tilemap.is_solid(tx, tile_below_y) {
-                self.on_ground = true;
-                break;
-            }
-        }
-
-        // Also check if standing on a platform
-        let player_left_f = self.x;
-        let player_right_f = self.x + self.width as f32;
-        let player_bottom_f = self.y + self.height as f32;
-
-        for platform in &tilemap.moving_platforms {
-            let platform_left = platform.x;
-            let platform_right = platform.x + tilemap.tile_size as f32;
-            let platform_top = platform.y;
-
-            // Check if player's feet are on top of the platform
-            // Use tighter tolerance to match handle_platforms
-            if player_bottom_f >= platform_top
-                && player_bottom_f <= platform_top + 2.0
-                && player_right_f > platform_left
-                && player_left_f < platform_right
-            {
-                self.on_ground = true;
-                break;
-            }
-        }
     }
 
     pub fn is_dead(&self, screen_height: u32) -> bool {
