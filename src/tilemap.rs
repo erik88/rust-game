@@ -33,10 +33,10 @@ impl TileMap {
             vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            vec![0, 0, 0, 0, 0, 0, 0, 0, 11, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 11, 0, 0, 0, 0, 0, 0, 0],
+            vec![0, 0, 0, 0, 0, 0, 0, 0, 11, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 11, 0, 0, 0, 0, 0, 0, 0],
             vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            vec![0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            vec![0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0],
             vec![0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0],
             vec![0, 0, 0, 1, 1, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             vec![0, 1, 1, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
@@ -276,6 +276,47 @@ impl TileMap {
             return false;
         }
         self.tiles[tile_y as usize][tile_x as usize] == 3
+    }
+
+    /// Get the tile type at a specific tile position (for testing)
+    pub fn get_tile(&self, tile_x: i32, tile_y: i32) -> u32 {
+        if tile_x < 0 || tile_y < 0 || tile_x >= self.width as i32 || tile_y >= self.height as i32 {
+            return 0;
+        }
+        self.tiles[tile_y as usize][tile_x as usize]
+    }
+
+    /// Set a tile type at a specific position (for testing)
+    pub fn set_tile(&mut self, tile_x: i32, tile_y: i32, tile_type: u32) {
+        if tile_x >= 0 && tile_y >= 0 && tile_x < self.width as i32 && tile_y < self.height as i32 {
+            self.tiles[tile_y as usize][tile_x as usize] = tile_type;
+        }
+    }
+
+    /// Add a moving platform at a specific tile position (for testing)
+    /// tile_type: 9=up, 10=right, 11=down, 12=left
+    pub fn add_platform(&mut self, tile_x: i32, tile_y: i32, tile_type: u32) {
+        let platform = MovingPlatform {
+            x: (tile_x as f32) * (self.tile_size as f32),
+            y: (tile_y as f32) * (self.tile_size as f32),
+            tile_type,
+            active: false,
+            vel_x: 0.0,
+            vel_y: 0.0,
+            original_tile_x: tile_x,
+            original_tile_y: tile_y,
+        };
+        self.moving_platforms.push(platform);
+    }
+
+    /// Manually activate a platform and set its velocity (for testing)
+    pub fn activate_platform_at(&mut self, tile_x: i32, tile_y: i32) {
+        self.activate_platform(tile_x, tile_y);
+    }
+
+    /// Clear all moving platforms (for testing)
+    pub fn clear_platforms(&mut self) {
+        self.moving_platforms.clear();
     }
 
     pub fn render(&self, canvas: &mut WindowCanvas, texture: &Texture, camera_x: i32) {

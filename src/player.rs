@@ -10,7 +10,7 @@ pub struct Player {
     pub height: u32,
     pub vel_x: f32,
     pub vel_y: f32,
-    on_ground: bool,
+    pub on_ground: bool,
     was_on_ground: bool,
 
     // Spawn position for reset
@@ -414,6 +414,20 @@ impl Player {
         for ty in top_tile..=bottom_tile {
             for tx in left_tile..=right_tile {
                 if tilemap.is_deadly(tx, ty) {
+                    // If player is on ground and this deadly tile is at their feet level,
+                    // it's safe (standing on top of deadly tile)
+                    if self.on_ground && ty == bottom_tile {
+                        // Check if player's feet are actually on top of this tile
+                        let tile_top = (ty as f32) * (tilemap.tile_size as f32);
+                        let feet_y = self.y + self.height as f32;
+
+                        // If feet are within a few pixels of the tile top, they're standing on it
+                        if (feet_y - tile_top).abs() < 3.0 {
+                            continue; // Safe to stand on top of deadly tile
+                        }
+                    }
+
+                    // Otherwise, touching deadly tile is fatal
                     return true;
                 }
             }

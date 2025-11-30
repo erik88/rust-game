@@ -1,4 +1,4 @@
-- [ ] Implement headless mode so it is easy to create and run test cases, especially so that AI Agents can queue inputs and test different kinds of input and interactions. 
+- [ ] Refactor tests to setup a minimal tilemap instead of reusing the one from the game. 
 
 - [ ] Not possible to walk onto a downward facing platform
 

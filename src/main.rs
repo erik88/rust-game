@@ -1,13 +1,14 @@
+mod engine;
 mod input;
 mod player;
+mod time;
 mod tilemap;
 
 use sdl2::image::{InitFlag, LoadTexture};
 use std::time::{Duration, Instant};
 
+use crate::engine::GameEngine;
 use crate::input::InputHandler;
-use crate::player::Player;
-use crate::tilemap::TileMap;
 
 fn main() -> Result<(), String> {
     // Initialize SDL2
@@ -38,9 +39,8 @@ fn main() -> Result<(), String> {
     let character_texture = texture_creator.load_texture("character.png")?;
     let tilemap_texture = texture_creator.load_texture("tilemap.png")?;
 
-    // Create game objects
-    let mut player = Player::new(100.0, 300.0);
-    let mut tilemap = TileMap::new();
+    // Create game engine
+    let mut engine = GameEngine::new();
 
     let mut event_pump = sdl_context.event_pump()?;
     let mut input_handler = InputHandler::new();
@@ -61,19 +61,12 @@ fn main() -> Result<(), String> {
             break 'running;
         }
 
-        // Update tilemap (for disappearing tiles)
-        tilemap.update(delta_time);
-
-        // Update player
-        player.update(input_handler.state(), &mut tilemap, delta_time);
-
-        // Check if player fell off the screen or touched deadly tile and reset if needed
-        if player.is_dead(600) || player.is_touching_deadly_tile(&tilemap) {
-            player.reset();
-            tilemap.reset();
-        }
+        // Update game engine
+        engine.step(input_handler.state(), delta_time);
 
         // Camera follows player
+        let player = engine.player();
+        let tilemap = engine.tilemap();
         let level_width = (tilemap.width as i32) * (tilemap.tile_size as i32);
         let max_camera_x = (level_width - 800).max(0);
         let camera_x = (player.x as i32 - 400).max(0).min(max_camera_x);
