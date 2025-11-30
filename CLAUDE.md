@@ -21,7 +21,8 @@ There are six tiles per row, so tile 7 is located at (0,40);
 | 12          | A moving tile. Goes left.                                    |
 
 ## Moving tiles
-- Solid, the player cannot be inside them
-- Activate when the player steps on top of them
-- Will push the player ahead of them
-- If the player is standing on a horizontally moving block, it will carry him (unless other collisions occur)
+- Solid, the player cannot be inside them.
+- Activate when the player steps on top of them, and start moving in their respective direction.
+- Horizontally moving tiles (left/right) will
+  - Push the player ahead of them if he is in the way 
+  - Carry the player forward, the player is standing on top of them.
