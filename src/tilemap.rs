@@ -1,4 +1,5 @@
-use sdl2::rect::Rect;
+use crate::geometry::rect::Rect;
+use crate::geometry::vec2d::Vec2d;
 use sdl2::render::{Texture, WindowCanvas};
 use std::collections::HashMap;
 
@@ -25,22 +26,38 @@ pub struct TileMap {
     original_platforms: Vec<MovingPlatform>, // Store original platform positions for reset
 }
 
+pub struct Tile {
+    pub tile_type: u32,
+    pub x: usize,
+    pub y: usize,
+}
+
+impl Tile {
+    pub fn get_bounding_rect(&self) -> Rect {
+        Rect::new(
+            Vec2d::new(self.x as f32 * 40.0, self.y as f32 * 40.0),
+            Vec2d::new(40.0, 40.0),
+        )
+    }
+}
+
 impl TileMap {
     pub fn new() -> Self {
         // Create a sample level
         // 0 = empty, 1 = solid tile, 2 = different tile type
+        #[rustfmt::skip]
         let level_data = vec![
             vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            vec![0, 0, 0, 0, 0, 0, 0, 0, 11, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 11, 0, 0, 0, 0, 0, 0, 0],
+            vec![0, 0, 0, 0, 0, 0, 0, 0,11, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1,11, 0, 0, 0, 0, 0, 0, 0],
             vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             vec![0, 0, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0],
             vec![0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0],
             vec![0, 0, 0, 1, 1, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             vec![0, 1, 1, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 10, 0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0, 12, 0, 0, 0, 0, 9, 0],
+            vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0,10, 0, 0, 0, 0, 0, 0, 0, 9, 0, 0, 0, 0,12, 0, 0, 0, 0, 9, 0],
             vec![1, 1, 1, 1, 1, 4, 4, 1, 1, 1, 1, 4, 4, 1, 1, 1, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
         ];
 
@@ -93,6 +110,20 @@ impl TileMap {
         self.disappearing_tiles.clear();
         // Reset platforms to original state
         self.moving_platforms = self.original_platforms.clone();
+    }
+
+    pub fn tiles_of_type(&self, t: u32) -> Vec<Tile> {
+        self.tiles
+            .iter()
+            .flatten()
+            .enumerate()
+            .filter(|(_, tile_type)| **tile_type == t)
+            .map(|(index, &tile_type)| Tile {
+                tile_type,
+                x: index % self.width,
+                y: index / self.width,
+            })
+            .collect::<Vec<Tile>>()
     }
 
     pub fn update(&mut self, delta_time: f32) {
@@ -158,8 +189,8 @@ impl TileMap {
 
                 let mut collided = false;
 
-                for ty in (platform_top / tile_size as i32)
-                    ..=((platform_bottom - 1) / tile_size as i32)
+                for ty in
+                    (platform_top / tile_size as i32)..=((platform_bottom - 1) / tile_size as i32)
                 {
                     for tx in (platform_left / tile_size as i32)
                         ..=((platform_right - 1) / tile_size as i32)
@@ -322,7 +353,8 @@ impl TileMap {
     pub fn render(&self, canvas: &mut WindowCanvas, texture: &Texture, camera_x: i32) {
         // Calculate which tiles are visible
         let start_col = (camera_x / self.tile_size as i32).max(0) as usize;
-        let end_col = ((camera_x + 800) / self.tile_size as i32 + 1).min(self.width as i32) as usize;
+        let end_col =
+            ((camera_x + 800) / self.tile_size as i32 + 1).min(self.width as i32) as usize;
 
         for row in 0..self.height {
             for col in start_col..end_col {
@@ -334,21 +366,23 @@ impl TileMap {
                     let src_x = ((tile_id - 1) % tiles_per_row) * self.tile_size;
                     let src_y = ((tile_id - 1) / tiles_per_row) * self.tile_size;
 
-                    let src_rect = Rect::new(
+                    let src_rect = sdl2::rect::Rect::new(
                         src_x as i32,
                         src_y as i32,
                         self.tile_size,
                         self.tile_size,
                     );
 
-                    let dst_rect = Rect::new(
+                    let dst_rect = sdl2::rect::Rect::new(
                         (col as i32 * self.tile_size as i32) - camera_x,
                         row as i32 * self.tile_size as i32,
                         self.tile_size,
                         self.tile_size,
                     );
 
-                    canvas.copy(texture, Some(src_rect), Some(dst_rect)).unwrap();
+                    canvas
+                        .copy(texture, Some(src_rect), Some(dst_rect))
+                        .unwrap();
                 }
             }
         }
@@ -360,21 +394,19 @@ impl TileMap {
             let src_x = ((tile_id - 1) % tiles_per_row) * self.tile_size;
             let src_y = ((tile_id - 1) / tiles_per_row) * self.tile_size;
 
-            let src_rect = Rect::new(
-                src_x as i32,
-                src_y as i32,
-                self.tile_size,
-                self.tile_size,
-            );
+            let src_rect =
+                sdl2::rect::Rect::new(src_x as i32, src_y as i32, self.tile_size, self.tile_size);
 
-            let dst_rect = Rect::new(
+            let dst_rect = sdl2::rect::Rect::new(
                 platform.x as i32 - camera_x,
                 platform.y as i32,
                 self.tile_size,
                 self.tile_size,
             );
 
-            canvas.copy(texture, Some(src_rect), Some(dst_rect)).unwrap();
+            canvas
+                .copy(texture, Some(src_rect), Some(dst_rect))
+                .unwrap();
         }
     }
 }

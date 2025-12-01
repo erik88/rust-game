@@ -1,8 +1,9 @@
 mod engine;
+mod geometry;
 mod input;
 mod player;
-mod time;
 mod tilemap;
+mod time;
 
 use sdl2::image::{InitFlag, LoadTexture};
 use std::time::{Duration, Instant};

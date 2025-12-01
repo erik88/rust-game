@@ -1,7 +1,8 @@
-use sdl2::rect::Rect;
-use sdl2::render::{Texture, WindowCanvas};
+use crate::geometry::rect::Rect;
+use crate::geometry::vec2d::Vec2d;
 use crate::input::InputState;
 use crate::tilemap::TileMap;
+use sdl2::render::{Texture, WindowCanvas};
 
 pub struct Player {
     pub x: f32,
@@ -13,7 +14,8 @@ pub struct Player {
     pub on_ground: bool,
     was_on_ground: bool,
 
-    // Spawn position for reset
+    // Spawn and death
+    pub is_dead: bool,
     spawn_x: f32,
     spawn_y: f32,
 
@@ -43,10 +45,22 @@ impl Player {
             was_on_ground: false,
             spawn_x: x,
             spawn_y: y,
+            is_dead: false,
             frame: 0,
             frame_time: 0.0,
             facing_right: true,
         }
+    }
+
+    pub fn position(&self) -> Vec2d {
+        Vec2d::new(self.x, self.y)
+    }
+
+    pub fn bounding_rect(&self) -> Rect {
+        Rect::new(
+            Vec2d::new(self.x, self.y),
+            Vec2d::new(self.width as f32, self.height as f32),
+        )
     }
 
     pub fn update(&mut self, input: &InputState, tilemap: &mut TileMap, delta_time: f32) {
@@ -176,7 +190,7 @@ impl Player {
         let mut low = start_x.min(target_x);
         let mut high = start_x.max(target_x);
 
-        // Use binary search to find the exact collision point
+        // Use binary search to find the exact collision geometry
         for _ in 0..10 {
             let mid = (low + high) / 2.0;
             if self.check_collision_at(mid, self.y, tilemap) {
@@ -208,7 +222,7 @@ impl Player {
         let mut low = start_y.min(target_y);
         let mut high = start_y.max(target_y);
 
-        // Use binary search to find the exact collision point
+        // Use binary search to find the exact collision geometry
         for _ in 0..10 {
             let mid = (low + high) / 2.0;
             if self.check_collision_at(x, mid, tilemap) {
@@ -237,9 +251,9 @@ impl Player {
     fn check_collision_at(&self, x: f32, y: f32, tilemap: &TileMap) -> bool {
         // Define the player's corners at the given position
         let corners = [
-            (x, y),                                           // Top-left
-            (x + self.width as f32 - 1.0, y),                 // Top-right
-            (x, y + self.height as f32 - 1.0),                // Bottom-left
+            (x, y),                                                      // Top-left
+            (x + self.width as f32 - 1.0, y),                            // Top-right
+            (x, y + self.height as f32 - 1.0),                           // Bottom-left
             (x + self.width as f32 - 1.0, y + self.height as f32 - 1.0), // Bottom-right
         ];
 
@@ -269,7 +283,12 @@ impl Player {
             let overlaps_x = player_right > platform_left && player_left < platform_right;
             let overlaps_y = player_bottom > platform_top && player_top < platform_bottom;
 
-            if overlaps_x && overlaps_y {
+            // Exception: if player's feet are on or near the top surface of the platform,
+            // don't treat it as a collision (allows walking onto platform from the side)
+            let feet_on_top =
+                player_bottom >= platform_top - 3.0 && player_bottom <= platform_top + 2.0;
+
+            if overlaps_x && overlaps_y && !feet_on_top {
                 return true;
             }
         }
@@ -342,11 +361,17 @@ impl Player {
 
                 if vertical_overlap {
                     // Platform moving right, check if it's to the left of player
-                    if platform.vel_x > 0.0 && platform_right >= player_left - 2.0 && platform_right <= player_left + 2.0 {
+                    if platform.vel_x > 0.0
+                        && platform_right >= player_left - 2.0
+                        && platform_right <= player_left + 2.0
+                    {
                         platform_push = Some(platform.vel_x);
                     }
                     // Platform moving left, check if it's to the right of player
-                    else if platform.vel_x < 0.0 && platform_left <= player_right + 2.0 && platform_left >= player_right - 2.0 {
+                    else if platform.vel_x < 0.0
+                        && platform_left <= player_right + 2.0
+                        && platform_left >= player_right - 2.0
+                    {
                         platform_push = Some(platform.vel_x);
                     }
                 }
@@ -399,47 +424,6 @@ impl Player {
         }
     }
 
-    pub fn is_touching_deadly_tile(&self, tilemap: &TileMap) -> bool {
-        let player_left = self.x as i32;
-        let player_right = (self.x + self.width as f32) as i32;
-        let player_top = self.y as i32;
-        let player_bottom = (self.y + self.height as f32) as i32;
-
-        // Check if touching any deadly tiles
-        let top_tile = player_top / tilemap.tile_size as i32;
-        let bottom_tile = player_bottom / tilemap.tile_size as i32;
-        let left_tile = player_left / tilemap.tile_size as i32;
-        let right_tile = player_right / tilemap.tile_size as i32;
-
-        for ty in top_tile..=bottom_tile {
-            for tx in left_tile..=right_tile {
-                if tilemap.is_deadly(tx, ty) {
-                    // If player is on ground and this deadly tile is at their feet level,
-                    // it's safe (standing on top of deadly tile)
-                    if self.on_ground && ty == bottom_tile {
-                        // Check if player's feet are actually on top of this tile
-                        let tile_top = (ty as f32) * (tilemap.tile_size as f32);
-                        let feet_y = self.y + self.height as f32;
-
-                        // If feet are within a few pixels of the tile top, they're standing on it
-                        if (feet_y - tile_top).abs() < 3.0 {
-                            continue; // Safe to stand on top of deadly tile
-                        }
-                    }
-
-                    // Otherwise, touching deadly tile is fatal
-                    return true;
-                }
-            }
-        }
-        false
-    }
-
-    pub fn is_dead(&self, screen_height: u32) -> bool {
-        // Player is dead if they fall below the screen
-        self.y > screen_height as f32 + 100.0
-    }
-
     pub fn reset(&mut self) {
         self.x = self.spawn_x;
         self.y = self.spawn_y;
@@ -450,17 +434,18 @@ impl Player {
         self.frame = 0;
         self.frame_time = 0.0;
         self.facing_right = true;
+        self.is_dead = false;
     }
 
     pub fn render(&self, canvas: &mut WindowCanvas, texture: &Texture, camera_x: i32) {
-        let src_rect = Rect::new(
+        let src_rect = sdl2::rect::Rect::new(
             (self.frame * self.width as usize) as i32,
             0,
             self.width,
             self.height,
         );
 
-        let dst_rect = Rect::new(
+        let dst_rect = sdl2::rect::Rect::new(
             self.x as i32 - camera_x,
             self.y as i32,
             self.width,

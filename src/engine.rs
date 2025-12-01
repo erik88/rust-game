@@ -40,12 +40,20 @@ impl GameEngine {
         self.player.update(input, &mut self.tilemap, delta_time);
 
         // Check if player fell off the screen or touched deadly tile and reset if needed
-        if self.player.is_dead(600) || self.player.is_touching_deadly_tile(&self.tilemap) {
+        if self.fallen_outside_playable_area(&self.player) || self.is_player_touching_deadly_tile()
+        {
+            self.player.is_dead = true;
             self.player.reset();
             self.tilemap.reset();
         }
 
         self.frame_count += 1;
+    }
+
+    pub fn fallen_outside_playable_area(&self, p: &Player) -> bool {
+        // Player is dead if they fall below the screen
+        let screen_height = self.tilemap.height * 40;
+        p.y > screen_height as f32 + 100.0
     }
 
     /// Get read-only reference to player
@@ -76,5 +84,19 @@ impl GameEngine {
     /// Check if player is on ground (convenience helper for tests)
     pub fn is_player_on_ground(&self) -> bool {
         self.player.on_ground
+    }
+
+    fn is_player_touching_deadly_tile(&self) -> bool {
+        // Add a small margin, so that while the player is standing with one foot on solid ground,
+        // he will not touch the deadly tile.
+        let player_bounds = self.player.bounding_rect().shrink(2.0);
+
+        // 3 = deadly tiles
+        for tile in self.tilemap.tiles_of_type(3) {
+            if player_bounds.intersects(&tile.get_bounding_rect()) {
+                return true;
+            }
+        }
+        false
     }
 }
