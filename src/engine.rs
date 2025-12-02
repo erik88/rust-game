@@ -2,37 +2,36 @@ use crate::input::InputState;
 use crate::player::Player;
 use crate::tilemap::TileMap;
 
+pub enum OnDeath {
+    Respawn,
+    Stop,
+}
+
 /// Core game engine - handles game state and logic independent of rendering
 pub struct GameEngine {
     pub player: Player,
     pub tilemap: TileMap,
-    frame_count: usize,
+    pub on_death: OnDeath,
+    pub stopped: bool,
 }
 
 impl GameEngine {
-    /// Create a new game engine with default state
-    pub fn new() -> Self {
-        let player = Player::new(100.0, 300.0);
-        let tilemap = TileMap::new();
-
+    /// Create a game engine
+    pub fn new_with(player: Player, tilemap: TileMap, on_death: OnDeath) -> Self {
         Self {
             player,
             tilemap,
-            frame_count: 0,
-        }
-    }
-
-    /// Create a game engine with custom initial state (useful for testing)
-    pub fn new_with(player: Player, tilemap: TileMap) -> Self {
-        Self {
-            player,
-            tilemap,
-            frame_count: 0,
+            on_death,
+            stopped: false,
         }
     }
 
     /// Run one game frame with the given input and delta time
     pub fn step(&mut self, input: &InputState, delta_time: f32) {
+        if self.stopped {
+            return;
+        }
+
         // Update tilemap (for disappearing tiles and moving platforms)
         self.tilemap.update(delta_time);
 
@@ -43,11 +42,16 @@ impl GameEngine {
         if self.fallen_outside_playable_area(&self.player) || self.is_player_touching_deadly_tile()
         {
             self.player.is_dead = true;
-            self.player.reset();
-            self.tilemap.reset();
+            match self.on_death {
+                OnDeath::Stop => {
+                    self.stopped = true;
+                }
+                OnDeath::Respawn => {
+                    self.player.reset();
+                    self.tilemap.reset();
+                }
+            }
         }
-
-        self.frame_count += 1;
     }
 
     pub fn fallen_outside_playable_area(&self, p: &Player) -> bool {
@@ -74,11 +78,6 @@ impl GameEngine {
     /// Get mutable reference to tilemap (for setup/testing)
     pub fn tilemap_mut(&mut self) -> &mut TileMap {
         &mut self.tilemap
-    }
-
-    /// Get current frame count
-    pub fn frame_count(&self) -> usize {
-        self.frame_count
     }
 
     /// Check if player is on ground (convenience helper for tests)

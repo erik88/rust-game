@@ -6,10 +6,12 @@ mod tilemap;
 mod time;
 
 use sdl2::image::{InitFlag, LoadTexture};
-use std::time::{Duration, Instant};
 
-use crate::engine::GameEngine;
+use crate::engine::{GameEngine, OnDeath};
 use crate::input::InputHandler;
+use crate::player::Player;
+use crate::tilemap::TileMap;
+use crate::time::{RealTime, TimeProvider};
 
 fn main() -> Result<(), String> {
     // Initialize SDL2
@@ -41,19 +43,15 @@ fn main() -> Result<(), String> {
     let tilemap_texture = texture_creator.load_texture("tilemap.png")?;
 
     // Create game engine
-    let mut engine = GameEngine::new();
+    let mut engine =
+        GameEngine::new_with(Player::new(100.0, 300.0), TileMap::new(), OnDeath::Respawn);
 
     let mut event_pump = sdl_context.event_pump()?;
     let mut input_handler = InputHandler::new();
-
-    // Target 60 FPS
-    let target_frame_time = Duration::from_micros(16667); // ~60 Hz
-    let mut last_frame_time = Instant::now();
+    let mut time_provider = RealTime::new();
 
     'running: loop {
-        let frame_start = Instant::now();
-        let delta_time = frame_start.duration_since(last_frame_time).as_secs_f32();
-        last_frame_time = frame_start;
+        let delta_time = time_provider.delta_time();
 
         // Update input state
         input_handler.update(&mut event_pump);
@@ -85,11 +83,8 @@ fn main() -> Result<(), String> {
         // Present the rendered frame
         canvas.present();
 
-        // Sleep for remaining frame time to maintain 60 Hz
-        let frame_time = frame_start.elapsed();
-        if frame_time < target_frame_time {
-            std::thread::sleep(target_frame_time - frame_time);
-        }
+        // Wait for next frame to maintain 60 Hz
+        time_provider.wait_for_next_frame();
     }
 
     Ok(())

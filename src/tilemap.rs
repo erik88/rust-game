@@ -302,13 +302,6 @@ impl TileMap {
         tile_type != 0 && tile_type != 3
     }
 
-    pub fn is_deadly(&self, tile_x: i32, tile_y: i32) -> bool {
-        if tile_x < 0 || tile_y < 0 || tile_x >= self.width as i32 || tile_y >= self.height as i32 {
-            return false;
-        }
-        self.tiles[tile_y as usize][tile_x as usize] == 3
-    }
-
     /// Get the tile type at a specific tile position (for testing)
     pub fn get_tile(&self, tile_x: i32, tile_y: i32) -> u32 {
         if tile_x < 0 || tile_y < 0 || tile_x >= self.width as i32 || tile_y >= self.height as i32 {
