@@ -23,11 +23,11 @@
 mod fixed_time;
 
 use fixed_time::FixedTime;
-use rustgame::engine::{GameEngine, OnDeath};
-use rustgame::input::{InputSource, InputState, QueuedInput};
-use rustgame::player::Player;
-use rustgame::tilemap::TileMap;
-use rustgame::time::TimeProvider;
+use rustgamex::engine::{GameEngine, OnDeath};
+use rustgamex::input::{InputSource, InputState, QueuedInput};
+use rustgamex::player::Player;
+use rustgamex::tilemap::TileMap;
+use rustgamex::time::TimeProvider;
 use std::env;
 
 /// Test runner for game simulation
@@ -230,7 +230,7 @@ impl Drop for TestRunner {
 /// Helper function to create a tilemap from a 2D array of tile types
 /// Moving platforms (tiles 9-12) are automatically extracted
 pub fn create_tilemap(level_data: Vec<Vec<u32>>) -> TileMap {
-    use rustgame::tilemap::MovingPlatform;
+    use rustgamex::tilemap::MovingPlatform;
 
     let height = level_data.len();
     let width = if height > 0 { level_data[0].len() } else { 0 };
@@ -288,7 +288,6 @@ pub fn create_tilemap(level_data: Vec<Vec<u32>>) -> TileMap {
     tilemap
 }
 
-#[cfg(test)]
 mod tests {
     use super::*;
 

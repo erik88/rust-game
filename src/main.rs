@@ -1,17 +1,10 @@
-mod engine;
-mod geometry;
-mod input;
-mod player;
-mod tilemap;
-mod time;
-
 use sdl2::image::{InitFlag, LoadTexture};
 
-use crate::engine::{GameEngine, OnDeath};
-use crate::input::InputHandler;
-use crate::player::Player;
-use crate::tilemap::TileMap;
-use crate::time::{RealTime, TimeProvider};
+use rustgamex::engine::{GameEngine, OnDeath};
+use rustgamex::input::InputHandler;
+use rustgamex::player::Player;
+use rustgamex::tilemap::TileMap;
+use rustgamex::time::{RealTime, TimeProvider};
 
 fn main() -> Result<(), String> {
     // Initialize SDL2

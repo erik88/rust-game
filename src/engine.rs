@@ -7,6 +7,10 @@ pub enum OnDeath {
     Stop,
 }
 
+pub fn i_am_a_library() -> u32 {
+    return 3;
+}
+
 /// Core game engine - handles game state and logic independent of rendering
 pub struct GameEngine {
     pub player: Player,

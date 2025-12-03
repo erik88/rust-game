@@ -1,4 +1,5 @@
-// Library exports for testing
+#![allow(dead_code)]
+
 pub mod engine;
 pub mod geometry;
 pub mod input;

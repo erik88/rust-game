@@ -1,4 +1,4 @@
-use rustgame::time::TimeProvider;
+use rustgamex::time::TimeProvider;
 
 /// Fixed-time provider for testing - always returns 1/60th of a second
 /// Does NOT sleep, allowing tests to run at full speed

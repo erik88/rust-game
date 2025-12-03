@@ -5,3 +5,11 @@ edition = "2024"
 
 [dependencies]
 sdl2 = { version = "0.38.0", features = ["image"] }
+
+[lib]
+name = "rustgamex"
+path = "src/lib.rs"
+
+[[bin]]
+name = "rustgame"
+path = "src/main.rs"
