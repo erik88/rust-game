@@ -48,11 +48,10 @@ impl TestRunner {
         let engine = GameEngine::new_with(player, tilemap, OnDeath::Stop);
 
         if visualize {
-            let mut runner = Self::new_visualized(engine);
-            runner
+            Self::new_visualized(engine)
         } else {
             Self {
-                engine: engine,
+                engine,
                 input_source: QueuedInput::new(),
                 time_provider: FixedTime::new(),
                 visualize: false,
@@ -515,58 +514,38 @@ mod tests {
         runner.run_frames(10);
 
         let player = runner.engine().player();
+        assert!(!player.is_dead, "Expected player to be alive.");
     }
 
     #[test]
     fn test_player_intersecting_death_block_dies() {
-        // Create a compact tilemap with a death block
-        let level_data = vec![
-            vec![0], // Empty space above
-            vec![0], // Empty space above
-            vec![3], // Death block at (0, 2)
-        ];
-        let tilemap = create_tilemap(level_data);
+        #[rustfmt::skip]
+        let mut runner = TestRunner::new_with(
+            Player::new(12.0, 40.0),
+            create_tilemap(vec![
+                vec![0], // Empty space above
+                vec![0], // Empty space above
+                vec![3], // Death block at (0, 2)
+            ])
+        );
 
-        // Position spawn in the playable area (in the empty space)
-        let spawn_x = 10.0;
-        let spawn_y = 10.0;
-
-        // Now create actual test with player intersecting the death block
-        let player_x = 12.0; // Inside the block horizontally
-        let player_y = 80.0 + 10.0; // Inside the block vertically (death block at y=80)
-
-        let player = Player::new(player_x, player_y);
-        let mut runner = TestRunner::new_with(player, tilemap);
-
-        // Run a single frame - player should die and reset
-        runner.run_frames(1);
-
-        let player = runner.engine().player();
+        // Run a few frames to let player fall and die
+        runner.run_frames(5);
 
         // Player should have reset to spawn position
-        assert_eq!(
-            player.x, spawn_x,
-            "Player should have reset to spawn x={} but is at x={}",
-            spawn_x, player.x
+        assert!(
+            runner.engine().player().is_dead,
+            "Expected player to be dead"
         );
-
-        assert_eq!(
-            player.y, spawn_y,
-            "Player should have reset to spawn y={} but is at y={}",
-            spawn_y, player.y
-        );
-
-        // Velocity should be reset to zero
-        assert_eq!(player.vel_x, 0.0, "Player velocity should be reset to 0");
-        assert_eq!(player.vel_y, 0.0, "Player velocity should be reset to 0");
     }
 
     #[test]
     fn test_holding_jump_produces_high_jump() {
-        // Create a test runner with default level
+        let player_start_y = 122.0;
+
         #[rustfmt::skip]
         let mut runner = TestRunner::new_with(
-            Player::new(5.0, 62.0),
+            Player::new(5.0, player_start_y),
             create_tilemap(vec![
                 vec![0],
                 vec![0],
@@ -594,11 +573,13 @@ mod tests {
             runner.queue_input(frame, input); // +1 because frame 0 was the settle frame
         }
 
-        runner.run_frames(60);
+        runner.run_frames(30);
 
         assert!(
-            runner.engine.player.y < 20.0,
-            "Holding jump should produce a high jump",
+            player_start_y - runner.engine.player.y > 80.0,
+            "Holding jump should produce a high jump {} {}",
+            player_start_y,
+            runner.engine.player.y
         );
     }
 
