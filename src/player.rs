@@ -31,6 +31,11 @@ const GRAVITY: f32 = 1200.0;
 const JUMP_HOLD_GRAVITY: f32 = 800.0; // Reduced gravity while holding jump
 const JUMP_RELEASE_DAMPING: f32 = 0.5; // Velocity multiplier when jump is released
 const FRAME_DURATION: f32 = 0.25;
+// Vertical tolerance for treating the player's feet as standing on a platform.
+// Platforms move before the player each frame, so this must exceed the distance
+// a platform travels in one frame (100 px/s * delta_time), or the player loses
+// his footing on a slow frame and the platform passes through him.
+const PLATFORM_RIDE_TOLERANCE: f32 = 6.0;
 
 impl Player {
     pub fn new(x: f32, y: f32) -> Self {
@@ -129,8 +134,8 @@ impl Player {
 
                 // Check if player's feet are on top of the platform
                 // Use wider tolerance to catch player positioned slightly above platform
-                let feet_on_platform = player_bottom >= platform_top - 3.0
-                    && player_bottom <= platform_top + 2.0
+                let feet_on_platform = player_bottom >= platform_top - PLATFORM_RIDE_TOLERANCE
+                    && player_bottom <= platform_top + PLATFORM_RIDE_TOLERANCE
                     && player_right > platform_left
                     && player_left < platform_right;
 
@@ -285,8 +290,8 @@ impl Player {
 
             // Exception: if player's feet are on or near the top surface of the platform,
             // don't treat it as a collision (allows walking onto platform from the side)
-            let feet_on_top =
-                player_bottom >= platform_top - 3.0 && player_bottom <= platform_top + 2.0;
+            let feet_on_top = player_bottom >= platform_top - PLATFORM_RIDE_TOLERANCE
+                && player_bottom <= platform_top + PLATFORM_RIDE_TOLERANCE;
 
             if overlaps_x && overlaps_y && !feet_on_top {
                 return true;
@@ -324,7 +329,8 @@ impl Player {
 
         // Check if player is standing on any platform
         let mut platform_to_activate: Option<(i32, i32)> = None;
-        let mut platform_vel: Option<(f32, f32)> = None;
+        // (vel_x, platform_top) of the platform the player is riding
+        let mut riding: Option<(f32, f32)> = None;
         let mut platform_push: Option<f32> = None; // Horizontal push from platform beside player
 
         for platform in &tilemap.moving_platforms {
@@ -335,8 +341,8 @@ impl Player {
 
             // Check if player's feet are touching the top of the platform
             // Use wider tolerance to catch player positioned slightly above platform
-            let feet_touching = player_bottom >= platform_top - 3.0
-                && player_bottom <= platform_top + 2.0
+            let feet_touching = player_bottom >= platform_top - PLATFORM_RIDE_TOLERANCE
+                && player_bottom <= platform_top + PLATFORM_RIDE_TOLERANCE
                 && player_right > platform_left
                 && player_left < platform_right;
 
@@ -349,8 +355,8 @@ impl Player {
                     platform_to_activate = Some((px, py));
                 }
 
-                // Store platform velocity to move player
-                platform_vel = Some((platform.vel_x, platform.vel_y));
+                // Store platform info to move player
+                riding = Some((platform.vel_x, platform_top));
                 break;
             }
 
@@ -396,9 +402,8 @@ impl Player {
         }
 
         // Move player with platform - platform carries the player
-        if let Some((vel_x, vel_y)) = platform_vel {
+        if let Some((vel_x, platform_top)) = riding {
             let move_x = vel_x * delta_time;
-            let move_y = vel_y * delta_time;
 
             // Try horizontal movement
             if move_x.abs() > 0.01 {
@@ -411,16 +416,21 @@ impl Player {
                 }
             }
 
-            // Try vertical movement
-            if move_y.abs() > 0.01 {
-                let new_y = self.y + move_y;
-                if self.check_collision_at(self.x, new_y, tilemap) {
-                    // Platform is pushing player into obstacle - resolve to edge
-                    self.y = self.resolve_y_position(self.x, new_y, tilemap);
-                } else {
-                    self.y = new_y;
-                }
+            // Vertical carry: the platform already moved this frame (the tilemap
+            // updates before the player), so place the player's feet directly on
+            // its top instead of integrating the platform velocity. Gravity must
+            // also be cancelled here - the platform never registers as a vertical
+            // collision while riding (the feet_on_top exception), so vel_y would
+            // otherwise grow each frame until the player sinks out of the riding
+            // tolerance and gets trapped inside upward-moving platforms.
+            let snap_y = platform_top - self.height as f32;
+            if self.check_collision_at(self.x, snap_y, tilemap) {
+                // Platform is pushing player into obstacle - resolve to edge
+                self.y = self.resolve_y_position(self.x, snap_y, tilemap);
+            } else {
+                self.y = snap_y;
             }
+            self.vel_y = 0.0;
         }
     }
 

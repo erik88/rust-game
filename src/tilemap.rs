@@ -61,8 +61,14 @@ impl TileMap {
             vec![1, 1, 1, 1, 1, 4, 4, 1, 1, 1, 1, 4, 4, 1, 1, 1, 3, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0],
         ];
 
+        Self::from_data(level_data)
+    }
+
+    /// Build a tilemap from a tile grid. Moving platform tiles (9-12) are
+    /// extracted from the grid into dynamic platforms.
+    pub fn from_data(level_data: Vec<Vec<u32>>) -> Self {
         let height = level_data.len();
-        let width = level_data[0].len();
+        let width = level_data.first().map_or(0, |row| row.len());
 
         // Extract moving platforms (tiles 9, 10, 11, 12)
         let mut platforms = Vec::new();
@@ -198,7 +204,8 @@ impl TileMap {
                         // Check if tile is solid directly
                         if tx >= 0 && ty >= 0 && tx < width as i32 && ty < height as i32 {
                             let tile_type = tiles[ty as usize][tx as usize];
-                            if tile_type != 0 && tile_type != 3 {
+                            if tile_type != 0 && tile_type != 3 && tile_type != crate::level::EXIT_TILE
+                            {
                                 collided = true;
                                 break;
                             }
@@ -297,9 +304,9 @@ impl TileMap {
             return false;
         }
         let tile_type = self.tiles[tile_y as usize][tile_x as usize];
-        // Type 3 (deadly) tiles are not solid, type 0 is empty
+        // Type 3 (deadly) and type 13 (exit) tiles are not solid, type 0 is empty
         // Types 4, 5, 6 are all solid (different decay states)
-        tile_type != 0 && tile_type != 3
+        tile_type != 0 && tile_type != 3 && tile_type != crate::level::EXIT_TILE
     }
 
     /// Get the tile type at a specific tile position (for testing)

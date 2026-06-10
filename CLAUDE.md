@@ -19,6 +19,7 @@ There are six tiles per row, so tile 7 is located at (0,40);
 | 10          | A moving tile. Goes right.                                   |
 | 11          | A moving tile. Goes down.                                    |
 | 12          | A moving tile. Goes left.                                    |
+| 13          | An exit tile (door). Not solid. Touching it completes the level. |
 
 ## Moving tiles
 - Solid, the player cannot be inside them.
@@ -26,3 +27,13 @@ There are six tiles per row, so tile 7 is located at (0,40);
 - Horizontally moving tiles (left/right) will
   - Push the player ahead of them if he is in the way 
   - Carry the player forward, the player is standing on top of them.
+
+# Levels
+
+Levels are ASCII text files in the "levels/" directory, loaded in filename
+order. The format is documented in `src/level.rs`: an optional `key: value`
+header (e.g. `name: My Level`), a blank line, then the tile grid using
+characters `.` (empty), `1`-`8` (tile types), `^` `>` `v` `<` (moving tiles
+9-12), `E` (exit, 13) and `P` (player spawn). Touching an exit tile completes
+the level; after a short transition pause the next level is loaded (looping
+back to the first level after the last).

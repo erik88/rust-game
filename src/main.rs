@@ -2,9 +2,28 @@ use sdl2::image::{InitFlag, LoadTexture};
 
 use rustgamex::engine::{GameEngine, OnDeath};
 use rustgamex::input::InputHandler;
-use rustgamex::player::Player;
-use rustgamex::tilemap::TileMap;
+use rustgamex::level::LevelData;
 use rustgamex::time::{RealTime, TimeProvider};
+
+/// Load all levels from the levels/ directory, in filename order
+fn load_levels() -> Result<Vec<LevelData>, String> {
+    let mut paths: Vec<_> = std::fs::read_dir("levels")
+        .map_err(|e| format!("failed to read levels directory: {}", e))?
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|ext| ext == "txt"))
+        .collect();
+    paths.sort();
+
+    let mut levels = Vec::new();
+    for path in &paths {
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| format!("{}: {}", path.display(), e))?;
+        let level =
+            LevelData::parse(&text).map_err(|e| format!("{}: {}", path.display(), e))?;
+        levels.push(level);
+    }
+    Ok(levels)
+}
 
 fn main() -> Result<(), String> {
     // Initialize SDL2
@@ -35,9 +54,8 @@ fn main() -> Result<(), String> {
     let character_texture = texture_creator.load_texture("character.png")?;
     let tilemap_texture = texture_creator.load_texture("tilemap.png")?;
 
-    // Create game engine
-    let mut engine =
-        GameEngine::new_with(Player::new(100.0, 300.0), TileMap::new(), OnDeath::Respawn);
+    // Create game engine with all levels from the levels/ directory
+    let mut engine = GameEngine::from_levels(load_levels()?, OnDeath::Respawn)?;
 
     let mut event_pump = sdl_context.event_pump()?;
     let mut input_handler = InputHandler::new();

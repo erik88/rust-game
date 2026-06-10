@@ -1,4 +1,5 @@
 use crate::input::InputState;
+use crate::level::{LevelData, EXIT_TILE};
 use crate::player::Player;
 use crate::tilemap::TileMap;
 
@@ -6,6 +7,10 @@ pub enum OnDeath {
     Respawn,
     Stop,
 }
+
+// How long the game freezes after the player reaches an exit tile, before the
+// next level is loaded
+const LEVEL_TRANSITION_TIME: f32 = 0.7;
 
 pub fn i_am_a_library() -> u32 {
     return 3;
@@ -17,22 +22,52 @@ pub struct GameEngine {
     pub tilemap: TileMap,
     pub on_death: OnDeath,
     pub stopped: bool,
+    levels: Vec<LevelData>,
+    current_level: usize,
+    transition_timer: Option<f32>,
 }
 
 impl GameEngine {
-    /// Create a game engine
+    /// Create a game engine with a single, externally constructed level.
+    /// Completing this level restarts it.
     pub fn new_with(player: Player, tilemap: TileMap, on_death: OnDeath) -> Self {
         Self {
             player,
             tilemap,
             on_death,
             stopped: false,
+            levels: Vec::new(),
+            current_level: 0,
+            transition_timer: None,
         }
+    }
+
+    /// Create a game engine that plays through a sequence of levels,
+    /// looping back to the first one after the last.
+    pub fn from_levels(levels: Vec<LevelData>, on_death: OnDeath) -> Result<Self, String> {
+        let first = levels.first().ok_or("no levels given")?;
+        let mut engine = Self::new_with(
+            Player::new(first.spawn.0, first.spawn.1),
+            TileMap::from_data(first.tiles.clone()),
+            on_death,
+        );
+        engine.levels = levels;
+        Ok(engine)
     }
 
     /// Run one game frame with the given input and delta time
     pub fn step(&mut self, input: &InputState, delta_time: f32) {
         if self.stopped {
+            return;
+        }
+
+        // During a level transition the world is frozen
+        if let Some(timer) = &mut self.transition_timer {
+            *timer -= delta_time;
+            if *timer <= 0.0 {
+                self.transition_timer = None;
+                self.advance_level();
+            }
             return;
         }
 
@@ -55,7 +90,36 @@ impl GameEngine {
                     self.tilemap.reset();
                 }
             }
+            return;
         }
+
+        // Check if player reached an exit tile - start the level transition
+        if self.is_player_touching_tile_of_type(EXIT_TILE) {
+            self.transition_timer = Some(LEVEL_TRANSITION_TIME);
+        }
+    }
+
+    /// Index of the level currently being played
+    pub fn current_level(&self) -> usize {
+        self.current_level
+    }
+
+    /// True while the post-exit freeze is running
+    pub fn is_transitioning(&self) -> bool {
+        self.transition_timer.is_some()
+    }
+
+    fn advance_level(&mut self) {
+        if self.levels.is_empty() {
+            // Single-level mode: restart the level
+            self.player.reset();
+            self.tilemap.reset();
+            return;
+        }
+        self.current_level = (self.current_level + 1) % self.levels.len();
+        let level = &self.levels[self.current_level];
+        self.player = Player::new(level.spawn.0, level.spawn.1);
+        self.tilemap = TileMap::from_data(level.tiles.clone());
     }
 
     pub fn fallen_outside_playable_area(&self, p: &Player) -> bool {
@@ -90,12 +154,16 @@ impl GameEngine {
     }
 
     fn is_player_touching_deadly_tile(&self) -> bool {
+        // 3 = deadly tiles
+        self.is_player_touching_tile_of_type(3)
+    }
+
+    fn is_player_touching_tile_of_type(&self, tile_type: u32) -> bool {
         // Add a small margin, so that while the player is standing with one foot on solid ground,
         // he will not touch the deadly tile.
         let player_bounds = self.player.bounding_rect().shrink(2.0);
 
-        // 3 = deadly tiles
-        for tile in self.tilemap.tiles_of_type(3) {
+        for tile in self.tilemap.tiles_of_type(tile_type) {
             if player_bounds.intersects(&tile.get_bounding_rect()) {
                 return true;
             }

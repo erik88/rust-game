@@ -227,64 +227,29 @@ impl Drop for TestRunner {
 }
 
 /// Helper function to create a tilemap from a 2D array of tile types
-/// Moving platforms (tiles 9-12) are automatically extracted
+/// Moving platforms (tiles 9-12) are automatically extracted.
+/// The grid is padded with empty space to the default level size (30x12) so
+/// small test maps keep a roomy playable area.
 pub fn create_tilemap(level_data: Vec<Vec<u32>>) -> TileMap {
-    use rustgamex::tilemap::MovingPlatform;
+    const DEFAULT_WIDTH: usize = 30;
+    const DEFAULT_HEIGHT: usize = 12;
 
-    let height = level_data.len();
-    let width = if height > 0 { level_data[0].len() } else { 0 };
+    let width = level_data
+        .iter()
+        .map(|row| row.len())
+        .max()
+        .unwrap_or(0)
+        .max(DEFAULT_WIDTH);
 
-    // Extract moving platforms (tiles 9, 10, 11, 12)
-    let mut platforms = Vec::new();
-    let mut tiles = level_data.clone();
-
-    for (y, row) in level_data.iter().enumerate() {
-        for (x, &tile) in row.iter().enumerate() {
-            if tile >= 9 && tile <= 12 {
-                platforms.push(MovingPlatform {
-                    x: (x as i32 * 40) as f32,
-                    y: (y as i32 * 40) as f32,
-                    tile_type: tile,
-                    active: false,
-                    vel_x: 0.0,
-                    vel_y: 0.0,
-                    original_tile_x: x as i32,
-                    original_tile_y: y as i32,
-                });
-                // Remove platform from static grid
-                tiles[y][x] = 0;
-            }
-        }
+    let mut tiles = level_data;
+    for row in &mut tiles {
+        row.resize(width, 0);
+    }
+    while tiles.len() < DEFAULT_HEIGHT {
+        tiles.push(vec![0; width]);
     }
 
-    // Create a base tilemap and replace its data
-    let mut tilemap = TileMap::new();
-
-    // Clear everything first
-    for y in 0..tilemap.height {
-        for x in 0..tilemap.width {
-            tilemap.set_tile(x as i32, y as i32, 0);
-        }
-    }
-    tilemap.clear_platforms();
-
-    // Set our custom tiles
-    for y in 0..height.min(tilemap.height) {
-        for x in 0..width.min(tilemap.width) {
-            tilemap.set_tile(x as i32, y as i32, tiles[y][x]);
-        }
-    }
-
-    // Add our platforms
-    for platform in platforms {
-        tilemap.add_platform(
-            platform.original_tile_x,
-            platform.original_tile_y,
-            platform.tile_type,
-        );
-    }
-
-    tilemap
+    TileMap::from_data(tiles)
 }
 
 mod tests {
@@ -392,6 +357,171 @@ mod tests {
         );
 
         // Player should have the same y-position as when landing
+    }
+
+    #[test]
+    fn test_player_rides_upward_moving_platform() {
+        #[rustfmt::skip]
+        let mut engine = GameEngine::new_with(
+            Player::new(52.0, 40.0),
+            create_tilemap(vec![
+                vec![0, 0, 0],
+                vec![0, 0, 0],
+                vec![0, 0, 0],
+                vec![0, 0, 0],
+                vec![0, 9, 0],
+            ]),
+            OnDeath::Stop,
+        );
+
+        // The game runs with real (variable) frame times, so riding must not
+        // depend on exact 60fps timing. Use a 50fps frame time here.
+        let dt = 0.02;
+        let input = InputState::new();
+
+        // Let the player fall from a height and land hard on the platform,
+        // which activates it
+        for _ in 0..20 {
+            engine.step(&input, dt);
+        }
+
+        assert!(
+            engine.player().on_ground,
+            "Player should have landed on the platform"
+        );
+
+        let landing_y = engine.player().y;
+
+        // Run 1 second - platform moves up at 100 px/s, carrying the player
+        for _ in 0..50 {
+            engine.step(&input, dt);
+        }
+
+        let player = engine.player();
+
+        // Player should have been carried upwards with the platform
+        let distance_up = landing_y - player.y;
+        assert!(
+            distance_up > 60.0,
+            "Player should have been carried up by platform (moved {} pixels, expected > 60)",
+            distance_up
+        );
+
+        // Player should still be riding the platform
+        assert!(
+            player.on_ground,
+            "Player should still be standing on the platform"
+        );
+
+        // Player must not be stuck inside the platform - his feet should be
+        // at (or above) the platform's top edge
+        let platform = &engine.tilemap().moving_platforms[0];
+        let player = engine.player();
+        let player_bottom = player.y + player.height as f32;
+        assert!(
+            player_bottom <= platform.y + 1.0,
+            "Player is stuck inside the platform (feet at {}, platform top at {})",
+            player_bottom,
+            platform.y
+        );
+    }
+
+    #[test]
+    fn test_completing_level_advances_to_next() {
+        use rustgamex::level::LevelData;
+
+        // Level 1: spawn two tiles left of the exit door
+        let level1 = LevelData::parse("P.E\n111").unwrap();
+        // Level 2: distinct layout, spawn on the second row
+        let level2 = LevelData::parse("....\n.P..\n1111").unwrap();
+        let mut engine =
+            GameEngine::from_levels(vec![level1, level2], OnDeath::Stop).unwrap();
+
+        let dt = 1.0 / 60.0;
+        let mut input = InputState::new();
+        input.right = true;
+
+        // Walk right into the exit door (2 tiles at 150 px/s < 1 second)
+        let mut reached_exit = false;
+        for _ in 0..60 {
+            engine.step(&input, dt);
+            if engine.is_transitioning() {
+                reached_exit = true;
+                break;
+            }
+        }
+        assert!(reached_exit, "Player should have reached the exit tile");
+        assert_eq!(engine.current_level(), 0, "Still on level 1 during transition");
+
+        // The world is frozen during the transition
+        let pos_during_transition = engine.player().position();
+        engine.step(&input, dt);
+        assert_eq!(
+            engine.player().position(),
+            pos_during_transition,
+            "Player should not move during the level transition"
+        );
+
+        // After the transition the next level is loaded
+        let input = InputState::new();
+        for _ in 0..60 {
+            engine.step(&input, dt);
+        }
+        assert!(!engine.is_transitioning(), "Transition should be over");
+        assert_eq!(engine.current_level(), 1, "Level 2 should be loaded");
+        assert!(
+            !engine.stopped && !engine.player().is_dead,
+            "Player should be alive at the start of level 2"
+        );
+    }
+
+    #[test]
+    fn test_all_shipped_level_files_parse() {
+        use rustgamex::level::LevelData;
+
+        let mut count = 0;
+        for entry in std::fs::read_dir("levels").expect("levels directory should exist") {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|ext| ext == "txt") {
+                let text = std::fs::read_to_string(&path).unwrap();
+                LevelData::parse(&text)
+                    .unwrap_or_else(|e| panic!("{} failed to parse: {}", path.display(), e));
+                count += 1;
+            }
+        }
+        assert!(count >= 2, "Expected at least 2 level files, found {}", count);
+    }
+
+    #[test]
+    fn test_shipped_levels_have_safe_spawn() {
+        use rustgamex::level::LevelData;
+
+        for entry in std::fs::read_dir("levels").expect("levels directory should exist") {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|ext| ext != "txt") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).unwrap();
+            let level = LevelData::parse(&text).unwrap();
+            let mut engine = GameEngine::from_levels(vec![level], OnDeath::Stop).unwrap();
+
+            // Let the player drop from the spawn point and settle
+            let input = InputState::new();
+            for _ in 0..120 {
+                engine.step(&input, 1.0 / 60.0);
+            }
+
+            assert!(
+                !engine.player().is_dead,
+                "{}: player dies right after spawning",
+                path.display()
+            );
+            assert!(
+                engine.is_player_on_ground(),
+                "{}: player does not land on ground after spawning",
+                path.display()
+            );
+        }
     }
 
     #[test]
