@@ -24,7 +24,8 @@
 //! | `E`     | 13 - exit tile                        |
 //! | `P`     | player spawn point (empty space)      |
 
-pub const EXIT_TILE: u32 = 13;
+use crate::player::{PLAYER_HEIGHT, PLAYER_WIDTH};
+use crate::tiles::{self, TILE_SIZE};
 
 /// Parsed level, independent of how it was stored on disk.
 #[derive(Clone, Debug)]
@@ -34,11 +35,6 @@ pub struct LevelData {
     pub spawn: (f32, f32),
     pub tiles: Vec<Vec<u32>>,
 }
-
-/// Player dimensions, used to center the spawn inside its tile.
-const PLAYER_WIDTH: f32 = 16.0;
-const PLAYER_HEIGHT: f32 = 38.0;
-const TILE_SIZE: f32 = 40.0;
 
 impl LevelData {
     pub fn parse(text: &str) -> Result<LevelData, String> {
@@ -80,23 +76,23 @@ impl LevelData {
             let mut row = Vec::with_capacity(width);
             for (x, ch) in line.chars().enumerate() {
                 let tile = match ch {
-                    '.' | ' ' | '0' => 0,
+                    '.' | ' ' | '0' => tiles::EMPTY,
                     '1'..='8' => ch.to_digit(10).unwrap(),
-                    '^' => 9,
-                    '>' => 10,
-                    'v' => 11,
-                    '<' => 12,
-                    'E' => EXIT_TILE,
+                    '^' => tiles::MOVE_UP,
+                    '>' => tiles::MOVE_RIGHT,
+                    'v' => tiles::MOVE_DOWN,
+                    '<' => tiles::MOVE_LEFT,
+                    'E' => tiles::EXIT,
                     'P' => {
                         if spawn.is_some() {
                             return Err("level has more than one spawn point 'P'".to_string());
                         }
                         // Center the player horizontally in the tile, feet on its floor
                         spawn = Some((
-                            x as f32 * TILE_SIZE + (TILE_SIZE - PLAYER_WIDTH) / 2.0,
-                            y as f32 * TILE_SIZE + TILE_SIZE - PLAYER_HEIGHT,
+                            x as f32 * TILE_SIZE + (TILE_SIZE - PLAYER_WIDTH as f32) / 2.0,
+                            y as f32 * TILE_SIZE + TILE_SIZE - PLAYER_HEIGHT as f32,
                         ));
-                        0
+                        tiles::EMPTY
                     }
                     other => {
                         return Err(format!(
@@ -104,7 +100,7 @@ impl LevelData {
                             other,
                             y + 1,
                             x + 1
-                        ))
+                        ));
                     }
                 };
                 row.push(tile);
@@ -168,7 +164,11 @@ mod tests {
     #[test]
     fn rejects_duplicate_spawn() {
         let err = LevelData::parse("P.P\n111").unwrap_err();
-        assert!(err.contains("more than one spawn"), "unexpected error: {}", err);
+        assert!(
+            err.contains("more than one spawn"),
+            "unexpected error: {}",
+            err
+        );
     }
 
     #[test]

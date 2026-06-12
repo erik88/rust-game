@@ -1,7 +1,8 @@
 use crate::input::InputState;
-use crate::level::{LevelData, EXIT_TILE};
+use crate::level::LevelData;
 use crate::player::Player;
 use crate::tilemap::TileMap;
+use crate::tiles;
 
 pub enum OnDeath {
     Respawn,
@@ -11,10 +12,6 @@ pub enum OnDeath {
 // How long the game freezes after the player reaches an exit tile, before the
 // next level is loaded
 const LEVEL_TRANSITION_TIME: f32 = 0.7;
-
-pub fn i_am_a_library() -> u32 {
-    return 3;
-}
 
 /// Core game engine - handles game state and logic independent of rendering
 pub struct GameEngine {
@@ -94,7 +91,7 @@ impl GameEngine {
         }
 
         // Check if player reached an exit tile - start the level transition
-        if self.is_player_touching_tile_of_type(EXIT_TILE) {
+        if self.is_player_touching_tile_of_type(tiles::EXIT) {
             self.transition_timer = Some(LEVEL_TRANSITION_TIME);
         }
     }
@@ -138,11 +135,6 @@ impl GameEngine {
         &self.tilemap
     }
 
-    /// Get mutable reference to player (for setup/testing)
-    pub fn player_mut(&mut self) -> &mut Player {
-        &mut self.player
-    }
-
     /// Get mutable reference to tilemap (for setup/testing)
     pub fn tilemap_mut(&mut self) -> &mut TileMap {
         &mut self.tilemap
@@ -154,8 +146,7 @@ impl GameEngine {
     }
 
     fn is_player_touching_deadly_tile(&self) -> bool {
-        // 3 = deadly tiles
-        self.is_player_touching_tile_of_type(3)
+        self.is_player_touching_tile_of_type(tiles::DEATH)
     }
 
     fn is_player_touching_tile_of_type(&self, tile_type: u32) -> bool {

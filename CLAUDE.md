@@ -13,8 +13,8 @@ There are six tiles per row, so tile 7 is located at (0,40);
 | 4           | A crumbling tile, it will turn into tile 5 after 0.4 seconds |
 | 5           | A crumbling tile, it will turn into tile 6 after 0.3 seconds |
 | 6           | A crumbling tile, it will disappear after 0.3 seconds        |
-| 7           | A periodic tile, it will turn into tile 8 after 1 second     |
-| 8           | A periodic tile, it will turn into tile 7 after 1 second     |
+| 7           | A periodic tile, solid. It will turn into tile 8 after 1 second |
+| 8           | A periodic tile, NOT solid. It will turn into tile 7 after 1 second |
 | 9           | A moving tile. Goes upwards.                                 |
 | 10          | A moving tile. Goes right.                                   |
 | 11          | A moving tile. Goes down.                                    |

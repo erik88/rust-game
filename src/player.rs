@@ -1,7 +1,7 @@
 use crate::geometry::rect::Rect;
 use crate::geometry::vec2d::Vec2d;
 use crate::input::InputState;
-use crate::tilemap::TileMap;
+use crate::tilemap::{MovingPlatform, TileMap};
 use sdl2::render::{Texture, WindowCanvas};
 
 pub struct Player {
@@ -25,6 +25,9 @@ pub struct Player {
     facing_right: bool,
 }
 
+pub const PLAYER_WIDTH: u32 = 16;
+pub const PLAYER_HEIGHT: u32 = 38;
+
 const PLAYER_SPEED: f32 = 150.0;
 const JUMP_SPEED: f32 = 400.0;
 const GRAVITY: f32 = 1200.0;
@@ -37,13 +40,20 @@ const FRAME_DURATION: f32 = 0.25;
 // his footing on a slow frame and the platform passes through him.
 const PLATFORM_RIDE_TOLERANCE: f32 = 6.0;
 
+/// True if feet at `player_bottom` are within riding tolerance of a
+/// platform's top edge
+fn near_platform_top(player_bottom: f32, platform_top: f32) -> bool {
+    player_bottom >= platform_top - PLATFORM_RIDE_TOLERANCE
+        && player_bottom <= platform_top + PLATFORM_RIDE_TOLERANCE
+}
+
 impl Player {
     pub fn new(x: f32, y: f32) -> Self {
         Self {
             x,
             y,
-            width: 16,
-            height: 38,
+            width: PLAYER_WIDTH,
+            height: PLAYER_HEIGHT,
             vel_x: 0.0,
             vel_y: 0.0,
             on_ground: false,
@@ -122,28 +132,11 @@ impl Player {
         self.on_ground = self.check_collision_at(self.x, self.y + 1.0, tilemap);
 
         // Also check if standing on a platform
-        if !self.on_ground {
-            let player_left = self.x;
-            let player_right = self.x + self.width as f32;
-            let player_bottom = self.y + self.height as f32;
-
-            for platform in &tilemap.moving_platforms {
-                let platform_left = platform.x;
-                let platform_right = platform.x + tilemap.tile_size as f32;
-                let platform_top = platform.y;
-
-                // Check if player's feet are on top of the platform
-                // Use wider tolerance to catch player positioned slightly above platform
-                let feet_on_platform = player_bottom >= platform_top - PLATFORM_RIDE_TOLERANCE
-                    && player_bottom <= platform_top + PLATFORM_RIDE_TOLERANCE
-                    && player_right > platform_left
-                    && player_left < platform_right;
-
-                if feet_on_platform && self.vel_y >= 0.0 {
-                    self.on_ground = true;
-                    break;
-                }
-            }
+        if !self.on_ground && self.vel_y >= 0.0 {
+            self.on_ground = tilemap
+                .moving_platforms
+                .iter()
+                .any(|platform| self.feet_on_platform(platform));
         }
 
         // Touch all tiles the player is currently overlapping
@@ -165,7 +158,10 @@ impl Player {
             self.on_ground = false;
         }
 
-        // Update animation
+        self.update_animation(delta_time);
+    }
+
+    fn update_animation(&mut self, delta_time: f32) {
         if self.vel_x.abs() > 0.1 && self.on_ground {
             // If we just started walking (frame is 0), set it to 1
             if self.frame == 0 {
@@ -187,6 +183,15 @@ impl Player {
             self.frame = 0;
             self.frame_time = 0.0;
         }
+    }
+
+    /// True if the player's feet rest on top of the platform: vertically
+    /// within the riding tolerance and horizontally overlapping it
+    fn feet_on_platform(&self, platform: &MovingPlatform) -> bool {
+        let rect = platform.rect();
+        near_platform_top(self.y + self.height as f32, rect.position.y)
+            && self.x + self.width as f32 > rect.position.x
+            && self.x < rect.position.x + rect.size.x
     }
 
     fn resolve_x_position(&self, target_x: f32, tilemap: &TileMap) -> f32 {
@@ -273,27 +278,17 @@ impl Player {
         }
 
         // Check collision with moving platforms (they are solid obstacles)
-        let player_left = x;
-        let player_right = x + self.width as f32;
-        let player_top = y;
-        let player_bottom = y + self.height as f32;
+        let player_rect = Rect::new(
+            Vec2d::new(x, y),
+            Vec2d::new(self.width as f32, self.height as f32),
+        );
 
         for platform in &tilemap.moving_platforms {
-            let platform_left = platform.x;
-            let platform_right = platform.x + tilemap.tile_size as f32;
-            let platform_top = platform.y;
-            let platform_bottom = platform.y + tilemap.tile_size as f32;
-
-            // Check if player overlaps platform
-            let overlaps_x = player_right > platform_left && player_left < platform_right;
-            let overlaps_y = player_bottom > platform_top && player_top < platform_bottom;
-
             // Exception: if player's feet are on or near the top surface of the platform,
             // don't treat it as a collision (allows walking onto platform from the side)
-            let feet_on_top = player_bottom >= platform_top - PLATFORM_RIDE_TOLERANCE
-                && player_bottom <= platform_top + PLATFORM_RIDE_TOLERANCE;
+            let feet_on_top = near_platform_top(y + self.height as f32, platform.y);
 
-            if overlaps_x && overlaps_y && !feet_on_top {
+            if !feet_on_top && player_rect.intersects(&platform.rect()) {
                 return true;
             }
         }
@@ -334,19 +329,8 @@ impl Player {
         let mut platform_push: Option<f32> = None; // Horizontal push from platform beside player
 
         for platform in &tilemap.moving_platforms {
-            let platform_left = platform.x;
-            let platform_right = platform.x + tilemap.tile_size as f32;
-            let platform_top = platform.y;
-            let platform_bottom = platform.y + tilemap.tile_size as f32;
-
             // Check if player's feet are touching the top of the platform
-            // Use wider tolerance to catch player positioned slightly above platform
-            let feet_touching = player_bottom >= platform_top - PLATFORM_RIDE_TOLERANCE
-                && player_bottom <= platform_top + PLATFORM_RIDE_TOLERANCE
-                && player_right > platform_left
-                && player_left < platform_right;
-
-            if feet_touching && self.vel_y >= 0.0 {
+            if self.feet_on_platform(platform) && self.vel_y >= 0.0 {
                 // Player is standing on this platform
                 // Mark platform for activation if not already active
                 if !platform.active {
@@ -356,14 +340,19 @@ impl Player {
                 }
 
                 // Store platform info to move player
-                riding = Some((platform.vel_x, platform_top));
+                riding = Some((platform.vel_x, platform.y));
                 break;
             }
 
             // Check if horizontally moving platform is beside the player and should push them
             if platform.active && platform.vel_x.abs() > 0.01 {
+                let platform_rect = platform.rect();
+                let platform_left = platform_rect.position.x;
+                let platform_right = platform_rect.position.x + platform_rect.size.x;
+
                 // Check vertical alignment - player and platform must overlap vertically
-                let vertical_overlap = player_bottom > platform_top && player_top < platform_bottom;
+                let vertical_overlap = player_bottom > platform_rect.position.y
+                    && player_top < platform_rect.position.y + platform_rect.size.y;
 
                 if vertical_overlap {
                     // Platform moving right, check if it's to the left of player

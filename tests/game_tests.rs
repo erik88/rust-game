@@ -434,8 +434,7 @@ mod tests {
         let level1 = LevelData::parse("P.E\n111").unwrap();
         // Level 2: distinct layout, spawn on the second row
         let level2 = LevelData::parse("....\n.P..\n1111").unwrap();
-        let mut engine =
-            GameEngine::from_levels(vec![level1, level2], OnDeath::Stop).unwrap();
+        let mut engine = GameEngine::from_levels(vec![level1, level2], OnDeath::Stop).unwrap();
 
         let dt = 1.0 / 60.0;
         let mut input = InputState::new();
@@ -451,7 +450,11 @@ mod tests {
             }
         }
         assert!(reached_exit, "Player should have reached the exit tile");
-        assert_eq!(engine.current_level(), 0, "Still on level 1 during transition");
+        assert_eq!(
+            engine.current_level(),
+            0,
+            "Still on level 1 during transition"
+        );
 
         // The world is frozen during the transition
         let pos_during_transition = engine.player().position();
@@ -489,7 +492,11 @@ mod tests {
                 count += 1;
             }
         }
-        assert!(count >= 2, "Expected at least 2 level files, found {}", count);
+        assert!(
+            count >= 2,
+            "Expected at least 2 level files, found {}",
+            count
+        );
     }
 
     #[test]
@@ -522,6 +529,86 @@ mod tests {
                 path.display()
             );
         }
+    }
+
+    #[test]
+    fn test_periodic_tiles_swap_every_second() {
+        let mut tilemap = create_tilemap(vec![vec![7, 8]]);
+        assert_eq!(tilemap.get_tile(0, 0), 7);
+        assert_eq!(tilemap.get_tile(1, 0), 8);
+
+        // After 0.9 seconds nothing has changed
+        for _ in 0..54 {
+            tilemap.update(1.0 / 60.0);
+        }
+        assert_eq!(
+            tilemap.get_tile(0, 0),
+            7,
+            "Tile should not swap before 1 second"
+        );
+        assert_eq!(
+            tilemap.get_tile(1, 0),
+            8,
+            "Tile should not swap before 1 second"
+        );
+
+        // After 1.05 seconds both tiles have swapped
+        for _ in 0..9 {
+            tilemap.update(1.0 / 60.0);
+        }
+        assert_eq!(
+            tilemap.get_tile(0, 0),
+            8,
+            "Tile 7 should swap to 8 after 1 second"
+        );
+        assert_eq!(
+            tilemap.get_tile(1, 0),
+            7,
+            "Tile 8 should swap to 7 after 1 second"
+        );
+
+        // After another second they swap back
+        for _ in 0..60 {
+            tilemap.update(1.0 / 60.0);
+        }
+        assert_eq!(
+            tilemap.get_tile(0, 0),
+            7,
+            "Tile should swap back after 2 seconds"
+        );
+        assert_eq!(
+            tilemap.get_tile(1, 0),
+            8,
+            "Tile should swap back after 2 seconds"
+        );
+    }
+
+    #[test]
+    fn test_player_falls_through_phased_out_periodic_tile() {
+        // Player stands on a periodic tile with nothing below it
+        #[rustfmt::skip]
+        let mut runner = TestRunner::new_with(
+            Player::new(12.0, 0.0),
+            create_tilemap(vec![
+                vec![0],
+                vec![7],
+            ]),
+        );
+
+        // Land on the tile while it is solid
+        runner.run_frames(5);
+        assert!(
+            runner.engine().player().on_ground,
+            "Player should stand on the periodic tile in its solid phase"
+        );
+
+        // After the tile phases out (1s) the player falls through and off
+        // the screen (12 rows = 480px + 100px margin, well under 2.5s of falling)
+        runner.run_frames(150);
+        assert!(
+            runner.engine().player().is_dead,
+            "Player should have fallen through the phased-out periodic tile"
+        );
     }
 
     #[test]
@@ -601,7 +688,7 @@ mod tests {
         );
 
         // Manually activate the platform (simulate it already moving)
-        runner.engine_mut().tilemap_mut().activate_platform_at(0, 1);
+        runner.engine_mut().tilemap_mut().activate_platform(0, 1);
 
         // Record player's starting X position
         let start_x = runner.engine().player().x;

@@ -1,7 +1,7 @@
 use sdl2::image::{InitFlag, LoadTexture};
 
 use rustgamex::engine::{GameEngine, OnDeath};
-use rustgamex::input::InputHandler;
+use rustgamex::input::{InputSource, SdlInput};
 use rustgamex::level::LevelData;
 use rustgamex::time::{RealTime, TimeProvider};
 
@@ -16,10 +16,9 @@ fn load_levels() -> Result<Vec<LevelData>, String> {
 
     let mut levels = Vec::new();
     for path in &paths {
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| format!("{}: {}", path.display(), e))?;
-        let level =
-            LevelData::parse(&text).map_err(|e| format!("{}: {}", path.display(), e))?;
+        let text =
+            std::fs::read_to_string(path).map_err(|e| format!("{}: {}", path.display(), e))?;
+        let level = LevelData::parse(&text).map_err(|e| format!("{}: {}", path.display(), e))?;
         levels.push(level);
     }
     Ok(levels)
@@ -57,22 +56,19 @@ fn main() -> Result<(), String> {
     // Create game engine with all levels from the levels/ directory
     let mut engine = GameEngine::from_levels(load_levels()?, OnDeath::Respawn)?;
 
-    let mut event_pump = sdl_context.event_pump()?;
-    let mut input_handler = InputHandler::new();
+    let mut input = SdlInput::new(sdl_context.event_pump()?);
     let mut time_provider = RealTime::new();
 
     'running: loop {
         let delta_time = time_provider.delta_time();
 
-        // Update input state
-        input_handler.update(&mut event_pump);
-
-        if input_handler.should_quit() {
+        let input_state = input.poll();
+        if input.should_quit() {
             break 'running;
         }
 
         // Update game engine
-        engine.step(input_handler.state(), delta_time);
+        engine.step(&input_state, delta_time);
 
         // Camera follows player
         let player = engine.player();
