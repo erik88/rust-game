@@ -194,6 +194,25 @@ impl Player {
             && self.x < rect.position.x + rect.size.x
     }
 
+    /// True if the player's whole width lies within the platform's, i.e. he is
+    /// standing entirely on it rather than overhanging an edge.
+    fn fully_on_platform(&self, platform: &MovingPlatform) -> bool {
+        let rect = platform.rect();
+        self.x >= rect.position.x && self.x + self.width as f32 <= rect.position.x + rect.size.x
+    }
+
+    /// True if a solid tile sits directly beneath the player's feet, i.e. solid
+    /// ground (not a platform) is helping hold him up. A player still propped up
+    /// by solid ground while stepping onto a platform hasn't committed to it yet.
+    fn on_solid_ground(&self, tilemap: &TileMap) -> bool {
+        let tile_size = tilemap.tile_size as f32;
+        // Probe the tile row immediately beneath the player's feet
+        let tile_y = ((self.y + self.height as f32) / tile_size).floor() as i32;
+        let left_tile = (self.x / tile_size).floor() as i32;
+        let right_tile = ((self.x + self.width as f32 - 1.0) / tile_size).floor() as i32;
+        (left_tile..=right_tile).any(|tx| tilemap.is_solid(tx, tile_y))
+    }
+
     fn resolve_x_position(&self, target_x: f32, tilemap: &TileMap) -> f32 {
         // Binary search to find the closest valid X position
         let start_x = self.x;
@@ -322,6 +341,11 @@ impl Player {
         let player_top = self.y;
         let player_bottom = self.y + self.height as f32;
 
+        // Whether solid ground (not a platform) is currently supporting the
+        // player. While true, stepping onto a platform must not start it - the
+        // player has somewhere else to stand and hasn't committed to it.
+        let supported_by_ground = self.on_solid_ground(tilemap);
+
         // Check if player is standing on any platform
         let mut platform_to_activate: Option<(i32, i32)> = None;
         // (vel_x, platform_top) of the platform the player is riding
@@ -331,9 +355,13 @@ impl Player {
         for platform in &tilemap.moving_platforms {
             // Check if player's feet are touching the top of the platform
             if self.feet_on_platform(platform) && self.vel_y >= 0.0 {
-                // Player is standing on this platform
-                // Mark platform for activation if not already active
-                if !platform.active {
+                // Player is standing on this platform. Activate it once he is
+                // entirely on top, or as soon as it is his only support (he is
+                // not also resting on solid ground) - otherwise a player still
+                // straddling solid ground keeps it dormant until fully aboard.
+                if !platform.active
+                    && (self.fully_on_platform(platform) || !supported_by_ground)
+                {
                     let px = (platform.x / tilemap.tile_size as f32) as i32;
                     let py = (platform.y / tilemap.tile_size as f32) as i32;
                     platform_to_activate = Some((px, py));

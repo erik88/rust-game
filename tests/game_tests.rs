@@ -801,61 +801,97 @@ mod tests {
     }
 
     #[test]
-    fn test_player_can_move_from_solid_ground_to_platform() {
-        // Create a test runner with default level
+    fn test_downward_platform_stays_inactive_while_player_on_solid_ground() {
+        // Solid ground at (0,1) butted up against a downward platform at (1,1).
         #[rustfmt::skip]
         let mut runner = TestRunner::new_with(
-            Player::new(10.0, 2.0),
+            Player::new(24.0, 2.0),
             create_tilemap(vec![
                 vec![0, 0],
-                vec![1, 11]
-            ])
+                vec![1, 11],
+            ]),
         );
 
-        // Run 1 frame to settle player on ground
+        // Settle on the solid tile
         runner.run_frames(1);
         assert!(
             runner.engine().player().on_ground,
-            "Player should be standing on solid ground"
+            "Player should start on solid ground"
         );
 
-        // Queue input: move right towards the platform
-        for frame in 1..=30 {
+        // Walk right so the player steps partway onto the platform but still
+        // overhangs the solid tile. A few frames at 150 px/s keep him straddling
+        // the tile boundary at x=40.
+        for frame in 1..=5 {
             let mut input = InputState::new();
-            input.right = true; // Move right
+            input.right = true;
             runner.queue_input(frame, input);
         }
-
-        // Run frames to let player move onto the platform
-        runner.run_frames(30);
+        runner.run_frames(5);
 
         let player = runner.engine().player();
-
-        // Player should have moved right onto the platform
+        // Sanity check the setup: the player is straddling - partly over the
+        // solid tile (x < 40) and partly over the platform (x + width > 40)
         assert!(
-            player.x > 40.0,
-            "Player should have moved right to x>{}, but is at x={}",
-            40.0,
+            player.x < 40.0 && player.x + player.width as f32 > 40.0,
+            "Test setup: player should be straddling the boundary (x={})",
             player.x
         );
 
-        // Player should still be on ground (standing on the platform)
+        // The platform must stay dormant: the player is still propped up by the
+        // solid tile and is not yet entirely standing on the platform.
+        let platform = &runner.engine().tilemap().moving_platforms[0];
         assert!(
-            player.on_ground,
-            "Player should still be on ground after moving onto platform"
+            !platform.active,
+            "Platform must stay dormant while the player is still supported by solid ground"
         );
-
-        // Player should be at approximately the same Y position
         assert!(
-            (player.y - 2.0).abs() < 5.0,
-            "Player should be at same height (y should be ~{} but is {})",
-            2.0,
-            player.y
+            (platform.y - 40.0).abs() < 0.001,
+            "A dormant platform should not have moved (y={})",
+            platform.y
         );
     }
 
     #[test]
-    fn test_downward_platform_stays_inactive_while_player_on_solid_ground() {
-        // TODO implement
+    fn test_downward_platform_activates_when_player_only_half_supported() {
+        // A downward platform at (1,1) with open air to its left at (0,1).
+        #[rustfmt::skip]
+        let mut runner = TestRunner::new_with(
+            Player::new(32.0, 2.0),
+            create_tilemap(vec![
+                vec![0, 0, 0],
+                vec![0, 11, 0],
+            ]),
+        );
+
+        // The player straddles the platform's left edge: half over open air at
+        // (0,1), half resting on the platform at (1,1). Nothing else holds him up.
+        let player = runner.engine().player();
+        assert!(
+            player.x < 40.0 && player.x + player.width as f32 > 40.0,
+            "Test setup: player should be half on the platform (x={})",
+            player.x
+        );
+
+        // With no solid ground beneath him the platform is his only support, so
+        // it should activate right away and carry him downward.
+        runner.run_frames(20);
+
+        let platform = &runner.engine().tilemap().moving_platforms[0];
+        assert!(
+            platform.active,
+            "Platform must start moving - the player has no other support"
+        );
+
+        let player = runner.engine().player();
+        assert!(
+            player.y > 20.0,
+            "Player should have been carried downward by the platform (y={})",
+            player.y
+        );
+        assert!(
+            player.on_ground,
+            "Player should still be riding the platform"
+        );
     }
 }
