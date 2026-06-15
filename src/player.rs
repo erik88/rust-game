@@ -464,7 +464,13 @@ impl Player {
         self.is_dead = false;
     }
 
-    pub fn render(&self, canvas: &mut WindowCanvas, texture: &Texture, camera_x: i32) {
+    pub fn render(
+        &self,
+        canvas: &mut WindowCanvas,
+        texture: &Texture,
+        camera_x: i32,
+        camera_y: i32,
+    ) {
         let src_rect = sdl2::rect::Rect::new(
             (self.frame * self.width as usize) as i32,
             0,
@@ -474,7 +480,7 @@ impl Player {
 
         let dst_rect = sdl2::rect::Rect::new(
             self.x as i32 - camera_x,
-            self.y as i32,
+            self.y as i32 - camera_y,
             self.width,
             self.height,
         );

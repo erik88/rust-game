@@ -311,7 +311,13 @@ impl TileMap {
         sdl2::rect::Rect::new(src_x as i32, src_y as i32, self.tile_size, self.tile_size)
     }
 
-    pub fn render(&self, canvas: &mut WindowCanvas, texture: &Texture, camera_x: i32) {
+    pub fn render(
+        &self,
+        canvas: &mut WindowCanvas,
+        texture: &Texture,
+        camera_x: i32,
+        camera_y: i32,
+    ) {
         // Calculate which tiles are visible
         let start_col = (camera_x / self.tile_size as i32).max(0) as usize;
         let end_col =
@@ -326,7 +332,7 @@ impl TileMap {
 
                 let dst_rect = sdl2::rect::Rect::new(
                     (col as i32 * self.tile_size as i32) - camera_x,
-                    row as i32 * self.tile_size as i32,
+                    (row as i32 * self.tile_size as i32) - camera_y,
                     self.tile_size,
                     self.tile_size,
                 );
@@ -340,7 +346,7 @@ impl TileMap {
         for platform in &self.moving_platforms {
             let dst_rect = sdl2::rect::Rect::new(
                 platform.x as i32 - camera_x,
-                platform.y as i32,
+                platform.y as i32 - camera_y,
                 self.tile_size,
                 self.tile_size,
             );

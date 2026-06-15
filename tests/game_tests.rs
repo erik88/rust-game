@@ -147,10 +147,10 @@ impl TestRunner {
             canvas.clear();
 
             // Render tilemap
-            tilemap.render(canvas, tilemap_tex, camera_x);
+            tilemap.render(canvas, tilemap_tex, camera_x, 0);
 
             // Render player
-            player.render(canvas, character_tex, camera_x);
+            player.render(canvas, character_tex, camera_x, 0);
 
             // Present the rendered frame
             canvas.present();
@@ -497,6 +497,26 @@ mod tests {
             "Expected at least 2 level files, found {}",
             count
         );
+    }
+
+    #[test]
+    fn test_shipped_levels_round_trip_through_to_text() {
+        // The level editor saves via LevelData::to_text; saving an unedited
+        // level must not change its meaning (tiles, spawn, name).
+        use rustgamex::level::LevelData;
+
+        for entry in std::fs::read_dir("levels").expect("levels directory should exist") {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|ext| ext != "txt") {
+                continue;
+            }
+            let original = LevelData::parse(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            let reparsed = LevelData::parse(&original.to_text()).unwrap();
+
+            assert_eq!(reparsed.name, original.name, "{}", path.display());
+            assert_eq!(reparsed.spawn, original.spawn, "{}", path.display());
+            assert_eq!(reparsed.tiles, original.tiles, "{}", path.display());
+        }
     }
 
     #[test]

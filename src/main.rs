@@ -2,27 +2,8 @@ use sdl2::image::{InitFlag, LoadTexture};
 
 use rustgamex::engine::{GameEngine, OnDeath};
 use rustgamex::input::{InputSource, SdlInput};
-use rustgamex::level::LevelData;
+use rustgamex::level;
 use rustgamex::time::{RealTime, TimeProvider};
-
-/// Load all levels from the levels/ directory, in filename order
-fn load_levels() -> Result<Vec<LevelData>, String> {
-    let mut paths: Vec<_> = std::fs::read_dir("levels")
-        .map_err(|e| format!("failed to read levels directory: {}", e))?
-        .filter_map(|entry| entry.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|ext| ext == "txt"))
-        .collect();
-    paths.sort();
-
-    let mut levels = Vec::new();
-    for path in &paths {
-        let text =
-            std::fs::read_to_string(path).map_err(|e| format!("{}: {}", path.display(), e))?;
-        let level = LevelData::parse(&text).map_err(|e| format!("{}: {}", path.display(), e))?;
-        levels.push(level);
-    }
-    Ok(levels)
-}
 
 fn main() -> Result<(), String> {
     // Initialize SDL2
@@ -54,7 +35,7 @@ fn main() -> Result<(), String> {
     let tilemap_texture = texture_creator.load_texture("tilemap.png")?;
 
     // Create game engine with all levels from the levels/ directory
-    let mut engine = GameEngine::from_levels(load_levels()?, OnDeath::Respawn)?;
+    let mut engine = GameEngine::from_levels(level::load_dir("levels")?, OnDeath::Respawn)?;
 
     let mut input = SdlInput::new(sdl_context.event_pump()?);
     let mut time_provider = RealTime::new();
@@ -81,11 +62,11 @@ fn main() -> Result<(), String> {
         canvas.set_draw_color(sdl2::pixels::Color::RGB(135, 206, 235));
         canvas.clear();
 
-        // Render tilemap
-        tilemap.render(&mut canvas, &tilemap_texture, camera_x);
+        // Render tilemap (the game only scrolls horizontally)
+        tilemap.render(&mut canvas, &tilemap_texture, camera_x, 0);
 
         // Render player
-        player.render(&mut canvas, &character_texture, camera_x);
+        player.render(&mut canvas, &character_texture, camera_x, 0);
 
         // Present the rendered frame
         canvas.present();
