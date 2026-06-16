@@ -66,22 +66,25 @@ fn main() -> Result<(), String> {
         // Update game engine
         engine.step(&input_state, delta_time);
 
-        // Camera follows player
+        // Camera follows player, centered, clamped to level bounds
         let player = engine.player();
         let tilemap = engine.tilemap();
         let level_width = (tilemap.width as i32) * (tilemap.tile_size as i32);
+        let level_height = (tilemap.height as i32) * (tilemap.tile_size as i32);
         let max_camera_x = (level_width - 800).max(0);
+        let max_camera_y = (level_height - 600).max(0);
         let camera_x = (player.x as i32 - 400).max(0).min(max_camera_x);
+        let camera_y = (player.y as i32 - 300).max(0).min(max_camera_y);
 
         // Clear the canvas with sky blue background
         canvas.set_draw_color(sdl2::pixels::Color::RGB(135, 206, 235));
         canvas.clear();
 
-        // Render tilemap (the game only scrolls horizontally)
-        tilemap.render(&mut canvas, &tilemap_texture, camera_x, 0);
+        // Render tilemap
+        tilemap.render(&mut canvas, &tilemap_texture, camera_x, camera_y);
 
         // Render player
-        player.render(&mut canvas, &character_texture, camera_x, 0);
+        player.render(&mut canvas, &character_texture, camera_x, camera_y);
 
         // Present the rendered frame
         canvas.present();
