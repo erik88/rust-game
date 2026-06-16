@@ -38,7 +38,10 @@ use rustgamex::time::{RealTime, TimeProvider};
 use std::path::PathBuf;
 
 const VIEW_WIDTH: u32 = 800;
-const VIEW_HEIGHT: u32 = 600;
+// The visible play area should match the game's so levels look the same in the
+// editor. The window is taller to fit the UI controls above and below it.
+const PLAY_HEIGHT: u32 = 600;
+const VIEW_HEIGHT: u32 = PLAY_HEIGHT + TOP_BAR_HEIGHT as u32 + HUD_HEIGHT as u32;
 const PAN_SPEED: f32 = 600.0;
 
 // Top toolbar

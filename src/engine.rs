@@ -116,6 +116,13 @@ impl GameEngine {
         self.current_level
     }
 
+    /// Name of the level currently being played, if any (empty in single-level mode)
+    pub fn current_level_name(&self) -> Option<&str> {
+        self.levels
+            .get(self.current_level)
+            .map(|l| l.name.as_str())
+    }
+
     /// True while the post-exit freeze is running
     pub fn is_transitioning(&self) -> bool {
         self.transition_timer.is_some()

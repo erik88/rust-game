@@ -18,6 +18,14 @@ fn parse_args() -> (usize, String) {
     (start, levels_dir)
 }
 
+fn set_window_title(canvas: &mut sdl2::render::WindowCanvas, engine: &GameEngine) {
+    let title = match engine.current_level_name() {
+        Some(name) if !name.is_empty() => format!("Platform Game - {}", name),
+        _ => "Platform Game".to_string(),
+    };
+    let _ = canvas.window_mut().set_title(&title);
+}
+
 fn main() -> Result<(), String> {
     // Initialize SDL2
     let sdl_context = sdl2::init()?;
@@ -55,6 +63,10 @@ fn main() -> Result<(), String> {
     let mut input = SdlInput::new(sdl_context.event_pump()?);
     let mut time_provider = RealTime::new();
 
+    // Keep the window title in sync with the current level's name
+    set_window_title(&mut canvas, &engine);
+    let mut titled_level = engine.current_level();
+
     'running: loop {
         let delta_time = time_provider.delta_time();
 
@@ -65,6 +77,12 @@ fn main() -> Result<(), String> {
 
         // Update game engine
         engine.step(&input_state, delta_time);
+
+        // Update the window title when the level changes
+        if engine.current_level() != titled_level {
+            set_window_title(&mut canvas, &engine);
+            titled_level = engine.current_level();
+        }
 
         // Camera follows player, centered, clamped to level bounds
         let player = engine.player();
