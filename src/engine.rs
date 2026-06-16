@@ -42,13 +42,23 @@ impl GameEngine {
     /// Create a game engine that plays through a sequence of levels,
     /// looping back to the first one after the last.
     pub fn from_levels(levels: Vec<LevelData>, on_death: OnDeath) -> Result<Self, String> {
-        let first = levels.first().ok_or("no levels given")?;
+        Self::from_levels_at(levels, 0, on_death)
+    }
+
+    pub fn from_levels_at(
+        levels: Vec<LevelData>,
+        start: usize,
+        on_death: OnDeath,
+    ) -> Result<Self, String> {
+        let start = start.min(levels.len().saturating_sub(1));
+        let first = levels.get(start).ok_or("no levels given")?;
         let mut engine = Self::new_with(
             Player::new(first.spawn.0, first.spawn.1),
             TileMap::from_data(first.tiles.clone()),
             on_death,
         );
         engine.levels = levels;
+        engine.current_level = start;
         Ok(engine)
     }
 

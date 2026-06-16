@@ -5,6 +5,19 @@ use rustgamex::input::{InputSource, SdlInput};
 use rustgamex::level;
 use rustgamex::time::{RealTime, TimeProvider};
 
+fn parse_args() -> (usize, String) {
+    let args: Vec<String> = std::env::args().collect();
+    let start = args.iter()
+        .position(|a| a == "--start-level")
+        .and_then(|i| args.get(i + 1)?.parse().ok())
+        .unwrap_or(0);
+    let levels_dir = args.iter()
+        .position(|a| a == "--levels-dir")
+        .and_then(|i| args.get(i + 1).cloned())
+        .unwrap_or_else(|| "levels".to_string());
+    (start, levels_dir)
+}
+
 fn main() -> Result<(), String> {
     // Initialize SDL2
     let sdl_context = sdl2::init()?;
@@ -35,7 +48,9 @@ fn main() -> Result<(), String> {
     let tilemap_texture = texture_creator.load_texture("tilemap.png")?;
 
     // Create game engine with all levels from the levels/ directory
-    let mut engine = GameEngine::from_levels(level::load_dir("levels")?, OnDeath::Respawn)?;
+    let (start, levels_dir) = parse_args();
+    let mut engine =
+        GameEngine::from_levels_at(level::load_dir(&levels_dir)?, start, OnDeath::Respawn)?;
 
     let mut input = SdlInput::new(sdl_context.event_pump()?);
     let mut time_provider = RealTime::new();
