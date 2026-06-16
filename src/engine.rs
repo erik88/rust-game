@@ -74,6 +74,10 @@ impl GameEngine {
         // Update player
         self.player.update(input, &mut self.tilemap, delta_time);
 
+        // Pick up any coins the player is overlapping; the exit stays shut
+        // until they are all gone.
+        self.tilemap.collect_coins(&self.player.bounding_rect());
+
         // Check if player fell off the screen or touched deadly tile and reset if needed
         if self.fallen_outside_playable_area(&self.player) || self.is_player_touching_deadly_tile()
         {
@@ -90,8 +94,9 @@ impl GameEngine {
             return;
         }
 
-        // Check if player reached an exit tile - start the level transition
-        if self.is_player_touching_tile_of_type(tiles::EXIT) {
+        // Check if player reached an open exit tile - start the level
+        // transition. A closed door (coins still uncollected) does nothing.
+        if self.tilemap.doors_open() && self.is_player_touching_tile_of_type(tiles::EXIT) {
             self.transition_timer = Some(LEVEL_TRANSITION_TIME);
         }
     }

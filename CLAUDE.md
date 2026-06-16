@@ -19,7 +19,14 @@ There are six tiles per row, so tile 7 is located at (0,40);
 | 10          | A moving tile. Goes right.                                   |
 | 11          | A moving tile. Goes down.                                    |
 | 12          | A moving tile. Goes left.                                    |
-| 13          | An exit tile (door). Not solid. Touching it completes the level. |
+| 13          | An exit tile (door), CLOSED. Not solid. Opens once all coins are collected; touching it while open completes the level. |
+| 14          | A coin. Not solid. Collected on touch. All coins must be collected before exit doors open. |
+| 19          | An exit tile (door), OPEN. Render-only sprite shown for tile 13 once all coins are collected; never stored in a level file. |
+
+## Coins and the exit
+- Place coins with the `C` character in level files (tile 14).
+- While any coin remains, exit doors (tile 13) render with the CLOSED sprite and touching them does nothing.
+- Once every coin is collected, doors render with the OPEN sprite (tile 19) and touching one completes the level.
 
 ## Moving tiles
 - Solid, the player cannot be inside them.

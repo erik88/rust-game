@@ -479,6 +479,101 @@ mod tests {
     }
 
     #[test]
+    fn test_collecting_all_coins_opens_the_exit() {
+        use rustgamex::geometry::rect::Rect;
+        use rustgamex::geometry::vec2d::Vec2d;
+        use rustgamex::tiles;
+
+        // A coin sitting next to an exit door.
+        #[rustfmt::skip]
+        let mut tilemap = create_tilemap(vec![
+            vec![tiles::COIN, tiles::EXIT],
+            vec![1, 1],
+        ]);
+
+        assert!(
+            !tilemap.doors_open(),
+            "the exit must stay closed while a coin is uncollected"
+        );
+
+        // Collect the coin sitting in tile (0, 0).
+        let coin_rect = Rect::new(Vec2d::new(0.0, 0.0), Vec2d::new(40.0, 40.0));
+        let collected = tilemap.collect_coins(&coin_rect);
+        assert_eq!(collected, 1, "the overlapping coin should be collected");
+
+        assert!(
+            tilemap.doors_open(),
+            "the exit opens once every coin is collected"
+        );
+        assert_eq!(
+            tilemap.collect_coins(&coin_rect),
+            0,
+            "a collected coin is gone and cannot be collected again"
+        );
+    }
+
+    #[test]
+    fn test_exit_stays_closed_until_all_coins_are_collected() {
+        use rustgamex::level::LevelData;
+
+        // Spawn, then a closed exit, then a coin further right, all on flat
+        // ground wide enough that the player never falls off.
+        let level = LevelData::parse("P.E....C......\n11111111111111").unwrap();
+        let mut engine = GameEngine::from_levels(vec![level], OnDeath::Stop).unwrap();
+        let dt = 1.0 / 60.0;
+
+        assert!(
+            !engine.tilemap().doors_open(),
+            "door starts closed - a coin is uncollected"
+        );
+
+        // Walk right, over the closed exit. It must not complete the level
+        // while the coin past it is still uncollected.
+        let mut input = InputState::new();
+        input.right = true;
+        for _ in 0..45 {
+            engine.step(&input, dt);
+        }
+        assert!(!engine.tilemap().doors_open(), "coin not collected yet");
+        assert!(
+            !engine.is_transitioning(),
+            "a closed exit must not complete the level"
+        );
+
+        // Keep going to collect the coin; the door then opens.
+        for _ in 0..120 {
+            engine.step(&input, dt);
+            if engine.tilemap().doors_open() {
+                break;
+            }
+        }
+        assert!(
+            engine.tilemap().doors_open(),
+            "collecting the last coin opens the door"
+        );
+        assert!(
+            !engine.is_transitioning(),
+            "the player is past the exit, not standing on it"
+        );
+
+        // Head back left to the now-open exit to finish the level.
+        input.right = false;
+        input.left = true;
+        let mut reached = false;
+        for _ in 0..200 {
+            engine.step(&input, dt);
+            if engine.is_transitioning() {
+                reached = true;
+                break;
+            }
+        }
+        assert!(
+            reached,
+            "an open exit completes the level when the player touches it"
+        );
+    }
+
+    #[test]
     fn test_all_shipped_level_files_parse() {
         use rustgamex::level::LevelData;
 
@@ -733,6 +828,52 @@ mod tests {
         assert!(
             runner.engine().player().on_ground,
             "Player should still be on ground after being pushed"
+        );
+    }
+
+    #[test]
+    fn test_stopped_moving_platform_is_destroyed_after_delay() {
+        // A right-moving platform at (0,1) with a solid wall at (2,1). The
+        // platform travels right, collides with the wall and stops, and should
+        // be destroyed one second later.
+        #[rustfmt::skip]
+        let mut tilemap = create_tilemap(vec![
+            vec![0, 0, 0],
+            vec![10, 0, 1],
+        ]);
+
+        tilemap.activate_platform(0, 1);
+        assert_eq!(tilemap.moving_platforms.len(), 1);
+
+        let dt = 1.0 / 60.0;
+
+        // Let the platform reach the wall and stop (collision happens at ~0.42s).
+        for _ in 0..40 {
+            tilemap.update(dt);
+        }
+        assert_eq!(
+            tilemap.moving_platforms.len(),
+            1,
+            "Platform should still exist shortly after stopping"
+        );
+        let platform = &tilemap.moving_platforms[0];
+        assert_eq!(
+            (platform.vel_x, platform.vel_y),
+            (0.0, 0.0),
+            "Platform should have stopped against the wall"
+        );
+        assert!(
+            platform.destroy_timer.is_some(),
+            "A stopped platform should be counting down to destruction"
+        );
+
+        // A full second after stopping the platform should be gone.
+        for _ in 0..61 {
+            tilemap.update(dt);
+        }
+        assert!(
+            tilemap.moving_platforms.is_empty(),
+            "Platform should be destroyed ~1s after it stopped"
         );
     }
 

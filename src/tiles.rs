@@ -22,12 +22,21 @@ pub const MOVE_UP: u32 = 9;
 pub const MOVE_RIGHT: u32 = 10;
 pub const MOVE_DOWN: u32 = 11;
 pub const MOVE_LEFT: u32 = 12;
-/// Touching this tile completes the level
+/// Exit door, closed phase. Rendered as the CLOSED door sprite; the level can
+/// only be completed once every coin has been collected, at which point the
+/// door is drawn with the EXIT_OPEN sprite and touching it completes the level.
 pub const EXIT: u32 = 13;
+/// A collectible coin. Every coin in a level must be collected before its
+/// exit door opens. Never stored in a level file as a separate tile - it is
+/// placed with the `C` character.
+pub const COIN: u32 = 14;
+/// Exit door, open phase. This is purely a render substitution for an [`EXIT`]
+/// tile once all coins are gone; it never appears in the tile grid itself.
+pub const EXIT_OPEN: u32 = 19;
 
 /// Whether the player and moving platforms collide with this tile type
 pub fn is_solid(tile_type: u32) -> bool {
-    !matches!(tile_type, EMPTY | DEATH | PERIODIC_GHOST | EXIT)
+    !matches!(tile_type, EMPTY | DEATH | PERIODIC_GHOST | EXIT | COIN)
 }
 
 /// Whether this tile type is extracted from the grid as a moving platform

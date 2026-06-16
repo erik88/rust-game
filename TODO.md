@@ -1,2 +1,1 @@
-- [ ] When directional blocks collide, after they have stopped they should be destroyed in 1 second.
-- [ ] Use other key commands for switching levels (that are friendlies to Swedish/international keyboard layouts)
+- [x] When directional blocks collide, after they have stopped they should be destroyed in 1 second.

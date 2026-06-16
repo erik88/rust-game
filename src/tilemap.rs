@@ -17,6 +17,10 @@ const CRUMBLE_TIME_VERY_CRACKED: f32 = 0.3;
 // Speed of activated moving platforms, in pixels per second
 const PLATFORM_SPEED: f32 = 100.0;
 
+// How long a moving platform lingers after it collides and stops before it is
+// destroyed
+const PLATFORM_DESTROY_DELAY: f32 = 1.0;
+
 #[derive(Clone)]
 pub struct MovingPlatform {
     pub x: f32,
@@ -27,6 +31,9 @@ pub struct MovingPlatform {
     pub vel_y: f32,
     pub original_tile_x: i32,
     pub original_tile_y: i32,
+    // Time left before a stopped platform is destroyed; `None` until it
+    // collides with something
+    pub destroy_timer: Option<f32>,
 }
 
 impl MovingPlatform {
@@ -85,6 +92,7 @@ impl TileMap {
                         vel_y: 0.0,
                         original_tile_x: x as i32,
                         original_tile_y: y as i32,
+                        destroy_timer: None,
                     });
                     tiles[y][x] = tiles::EMPTY;
                 }
@@ -194,6 +202,16 @@ impl TileMap {
                 continue;
             }
 
+            // A platform that already collided is winding down to destruction;
+            // count it down and remove it once the delay elapses.
+            if let Some(timer) = platform.destroy_timer.as_mut() {
+                *timer -= delta_time;
+                if *timer <= 0.0 {
+                    platforms_to_remove.push(i);
+                }
+                continue;
+            }
+
             platform.x += platform.vel_x * delta_time;
             platform.y += platform.vel_y * delta_time;
 
@@ -235,6 +253,7 @@ impl TileMap {
             if collided {
                 platform.vel_x = 0.0;
                 platform.vel_y = 0.0;
+                platform.destroy_timer = Some(PLATFORM_DESTROY_DELAY);
             }
         }
 
@@ -288,6 +307,33 @@ impl TileMap {
         self.disappearing_tiles.entry((x, y)).or_insert(remaining);
     }
 
+    /// Remove every coin the player's bounding box overlaps. Returns the number
+    /// collected this frame.
+    pub fn collect_coins(&mut self, player_bounds: &Rect) -> u32 {
+        let mut collected = 0;
+        for tile in self.tiles_of_type(tiles::COIN) {
+            if player_bounds.intersects(&tile.get_bounding_rect()) {
+                self.tiles[tile.y][tile.x] = tiles::EMPTY;
+                collected += 1;
+            }
+        }
+        collected
+    }
+
+    /// How many uncollected coins remain in the level.
+    pub fn coins_remaining(&self) -> usize {
+        self.tiles
+            .iter()
+            .flatten()
+            .filter(|&&t| t == tiles::COIN)
+            .count()
+    }
+
+    /// Exit doors stay shut until every coin has been collected.
+    pub fn doors_open(&self) -> bool {
+        self.coins_remaining() == 0
+    }
+
     pub fn is_solid(&self, tile_x: i32, tile_y: i32) -> bool {
         if tile_x < 0 || tile_y < 0 || tile_x >= self.width as i32 || tile_y >= self.height as i32 {
             return false;
@@ -323,12 +369,23 @@ impl TileMap {
         let end_col =
             ((camera_x + 800) / self.tile_size as i32 + 1).min(self.width as i32) as usize;
 
+        // Once all coins are collected, closed exit doors show the open sprite
+        let doors_open = self.doors_open();
+
         for row in 0..self.height {
             for col in start_col..end_col {
                 let tile_id = self.tiles[row][col];
                 if tile_id == tiles::EMPTY {
                     continue;
                 }
+
+                // The grid only ever stores EXIT; swap in the open sprite for
+                // rendering when the door is open.
+                let sprite_id = if tile_id == tiles::EXIT && doors_open {
+                    tiles::EXIT_OPEN
+                } else {
+                    tile_id
+                };
 
                 let dst_rect = sdl2::rect::Rect::new(
                     (col as i32 * self.tile_size as i32) - camera_x,
@@ -338,7 +395,7 @@ impl TileMap {
                 );
 
                 canvas
-                    .copy(texture, Some(self.tile_src_rect(tile_id)), Some(dst_rect))
+                    .copy(texture, Some(self.tile_src_rect(sprite_id)), Some(dst_rect))
                     .unwrap();
             }
         }

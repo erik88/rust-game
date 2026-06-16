@@ -22,6 +22,7 @@
 //! | `v`     | 11 - moving tile, goes down           |
 //! | `<`     | 12 - moving tile, goes left           |
 //! | `E`     | 13 - exit tile                        |
+//! | `C`     | 14 - coin (collect all to open exits) |
 //! | `P`     | player spawn point (empty space)      |
 
 use crate::player::{PLAYER_HEIGHT, PLAYER_WIDTH};
@@ -83,6 +84,7 @@ impl LevelData {
                     'v' => tiles::MOVE_DOWN,
                     '<' => tiles::MOVE_LEFT,
                     'E' => tiles::EXIT,
+                    'C' => tiles::COIN,
                     'P' => {
                         if spawn.is_some() {
                             return Err("level has more than one spawn point 'P'".to_string());
@@ -253,6 +255,7 @@ fn tile_to_char(tile: u32) -> char {
         tiles::MOVE_DOWN => 'v',
         tiles::MOVE_LEFT => '<',
         tiles::EXIT => 'E',
+        tiles::COIN => 'C',
         n @ 1..=8 => char::from_digit(n, 10).unwrap(),
         _ => '.', // EMPTY and anything unexpected
     }

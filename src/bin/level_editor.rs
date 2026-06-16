@@ -13,7 +13,7 @@
 //! - Arrow keys (or WASD)      : pan the camera
 //! - Ctrl+Arrow   : grow the canvas toward that edge
 //! - Ctrl+Shift+Arrow : shrink the canvas from that edge
-//! - `[` / `]`    : previous / next level
+//! - `,` / `.` (or PageUp/PageDown) : previous / next level
 //! - Home         : scroll back to the start of the level
 //! - G            : toggle the grid overlay
 //! - Ctrl+S       : save the current level back to its file
@@ -85,9 +85,11 @@ fn main() -> Result<(), String> {
     }
 
     // Palette: eraser, spawn placer, then every paintable tile in order
+    // (1..=EXIT, plus the coin which sits just past the exit in the tilemap)
     let palette: Vec<Tool> = std::iter::once(Tool::Erase)
         .chain(std::iter::once(Tool::Spawn))
         .chain((1..=tiles::EXIT).map(Tool::Tile))
+        .chain(std::iter::once(Tool::Tile(tiles::COIN)))
         .collect();
 
     print_controls();
@@ -183,10 +185,13 @@ fn main() -> Result<(), String> {
                             Keycode::Right | Keycode::D => pan_right = true,
                             Keycode::Up | Keycode::W => pan_up = true,
                             Keycode::Down | Keycode::S => pan_down = true,
-                            Keycode::LeftBracket => {
+                            // `,` / `.` (and PageUp/PageDown) switch levels.
+                            // The comma/period keys are unshifted on Swedish and
+                            // other international layouts, unlike `[` / `]`.
+                            Keycode::Comma | Keycode::PageUp => {
                                 switch_to = Some((current + docs.len() - 1) % docs.len());
                             }
-                            Keycode::RightBracket => {
+                            Keycode::Period | Keycode::PageDown => {
                                 switch_to = Some((current + 1) % docs.len());
                             }
                             Keycode::Home => {
@@ -569,7 +574,7 @@ fn set_title(canvas: &mut WindowCanvas, docs: &[Document], current: usize, tool:
 fn print_controls() {
     println!("Level Editor controls:");
     println!("  Left mouse  : paint selected tool      Right mouse : erase");
-    println!("  Click palette bar to pick a tool       [ / ]       : prev/next level");
+    println!("  Click palette bar to pick a tool       , / . (PgUp/PgDn): prev/next level");
     println!("  Arrows / WASD: pan camera              Home        : scroll to start");
     println!("  Ctrl+Arrow  : grow canvas at that edge Ctrl+Shift+Arrow: shrink that edge");
     println!("  G           : toggle grid              Ctrl+S      : save level");
