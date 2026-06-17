@@ -107,8 +107,13 @@ impl GameEngine {
         // until they are all gone.
         self.tilemap.collect_coins(&self.player.bounding_rect());
 
-        // Check if player fell off the screen or touched deadly tile and reset if needed
-        if self.fallen_outside_playable_area(&self.player) || self.is_player_touching_deadly_tile()
+        // Check if player fell off the screen or touched deadly tile and reset
+        // if needed. Touching a death tile marks it so it shows its hit sprite
+        // until the player revives. The margin keeps a player standing with one
+        // foot on solid ground from triggering an adjacent death tile.
+        let death_bounds = self.player.bounding_rect().shrink(2.0);
+        if self.fallen_outside_playable_area(&self.player)
+            || self.tilemap.trigger_death_tiles(&death_bounds)
         {
             self.player.is_dead = true;
             return;
@@ -175,10 +180,6 @@ impl GameEngine {
     /// Check if player is on ground (convenience helper for tests)
     pub fn is_player_on_ground(&self) -> bool {
         self.player.on_ground
-    }
-
-    fn is_player_touching_deadly_tile(&self) -> bool {
-        self.is_player_touching_tile_of_type(tiles::DEATH)
     }
 
     fn is_player_touching_tile_of_type(&self, tile_type: u32) -> bool {

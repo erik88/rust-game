@@ -2,7 +2,7 @@ use crate::geometry::rect::Rect;
 use crate::geometry::vec2d::Vec2d;
 use crate::tiles::{self, TILE_SIZE};
 use sdl2::render::{Texture, WindowCanvas};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // How long each phase of a periodic tile (7/8) lasts
 const PERIODIC_TILE_INTERVAL: f32 = 1.0;
@@ -27,6 +27,17 @@ const PLATFORM_DESTROY_DELAY: f32 = 1.0;
 const COIN_ANIM_INTERVAL: f32 = 5.0;
 const COIN_ANIM_FRAME: f32 = 0.25;
 
+// The coin graphic is a circle centered in its 40x40 tile; collision uses a
+// square of this size inscribed in that circle rather than the full tile, so
+// the player only collects it when actually overlapping the coin.
+const COIN_DIAMETER: f32 = 24.0;
+
+// When a coin is collected it plays a brief two-frame sparkle in its place.
+// The frames live at these pixel coordinates in tilemap.png and each shows for
+// COIN_COLLECT_FRAME seconds.
+const COIN_COLLECT_FRAME: f32 = 0.2;
+const COIN_COLLECT_SPRITES: [(i32, i32); 2] = [(80, 160), (120, 160)];
+
 #[derive(Clone)]
 pub struct MovingPlatform {
     pub x: f32,
@@ -48,6 +59,14 @@ impl MovingPlatform {
     }
 }
 
+/// A transient sparkle played at a coin's tile right after it is collected.
+#[derive(Clone)]
+struct CoinEffect {
+    tile_x: usize,
+    tile_y: usize,
+    timer: f32,
+}
+
 pub struct TileMap {
     pub width: usize,
     pub height: usize,
@@ -59,6 +78,8 @@ pub struct TileMap {
     original_platforms: Vec<MovingPlatform>, // Store original platform positions for reset
     periodic_timer: f32,                     // Shared clock for periodic tiles (7/8)
     coin_timer: f32,                         // Shared clock for the coin shimmer animation
+    triggered_death_tiles: HashSet<(usize, usize)>, // Death tiles the player has hit this life
+    coin_effects: Vec<CoinEffect>,           // Sparkles playing where coins were collected
 }
 
 pub struct Tile {
@@ -117,6 +138,8 @@ impl TileMap {
             original_platforms: platforms,
             periodic_timer: 0.0,
             coin_timer: 0.0,
+            triggered_death_tiles: HashSet::new(),
+            coin_effects: Vec::new(),
         }
     }
 
@@ -131,6 +154,8 @@ impl TileMap {
         self.moving_platforms = self.original_platforms.clone();
         self.periodic_timer = 0.0;
         self.coin_timer = 0.0;
+        self.triggered_death_tiles.clear();
+        self.coin_effects.clear();
     }
 
     pub fn tiles_of_type(&self, t: u32) -> Vec<Tile> {
@@ -152,6 +177,13 @@ impl TileMap {
         self.update_crumbling_tiles(delta_time);
         self.update_moving_platforms(delta_time);
         self.coin_timer = (self.coin_timer + delta_time) % COIN_ANIM_INTERVAL;
+
+        // Advance coin-collection sparkles and drop them once both frames played
+        let total = COIN_COLLECT_FRAME * COIN_COLLECT_SPRITES.len() as f32;
+        for effect in &mut self.coin_effects {
+            effect.timer += delta_time;
+        }
+        self.coin_effects.retain(|effect| effect.timer < total);
     }
 
     /// All periodic tiles swap between their solid and ghost phase on a
@@ -321,13 +353,33 @@ impl TileMap {
     /// collected this frame.
     pub fn collect_coins(&mut self, player_bounds: &Rect) -> u32 {
         let mut collected = 0;
+        let inset = (TILE_SIZE - COIN_DIAMETER) / 2.0;
         for tile in self.tiles_of_type(tiles::COIN) {
-            if player_bounds.intersects(&tile.get_bounding_rect()) {
+            if player_bounds.intersects(&tile.get_bounding_rect().shrink(inset)) {
                 self.tiles[tile.y][tile.x] = tiles::EMPTY;
+                self.coin_effects.push(CoinEffect {
+                    tile_x: tile.x,
+                    tile_y: tile.y,
+                    timer: 0.0,
+                });
                 collected += 1;
             }
         }
         collected
+    }
+
+    /// Mark every death tile the player's bounds overlap as "triggered" so it
+    /// renders its hit sprite until the level resets. Returns whether any death
+    /// tile was hit.
+    pub fn trigger_death_tiles(&mut self, player_bounds: &Rect) -> bool {
+        let mut hit = false;
+        for tile in self.tiles_of_type(tiles::DEATH) {
+            if player_bounds.intersects(&tile.get_bounding_rect()) {
+                self.triggered_death_tiles.insert((tile.x, tile.y));
+                hit = true;
+            }
+        }
+        hit
     }
 
     /// How many uncollected coins remain in the level.
@@ -370,12 +422,6 @@ impl TileMap {
             src_y += self.tile_size;
         }
         sdl2::rect::Rect::new(src_x as i32, src_y as i32, self.tile_size, self.tile_size)
-    }
-
-    /// True during the second half of the periodic cycle, when periodic tiles
-    /// show their transition sprite to telegraph the upcoming phase flip.
-    fn periodic_in_transition(&self) -> bool {
-        self.periodic_timer >= PERIODIC_TILE_INTERVAL / 2.0
     }
 
     /// Row offset (in tiles) into the coin's shimmer frames. The animation
@@ -428,20 +474,18 @@ impl TileMap {
                     self.tile_size,
                 );
 
-                // Periodic tiles show a transition sprite (one row below their
-                // normal graphic) during the second half of the cycle, giving
-                // the player a rhythmic cue that the phase is about to flip.
                 let mut src_rect = self.tile_src_rect(sprite_id);
-                if matches!(sprite_id, tiles::PERIODIC_SOLID | tiles::PERIODIC_GHOST)
-                    && self.periodic_in_transition()
-                {
-                    src_rect.set_y(src_rect.y() + self.tile_size as i32);
-                }
 
                 // Coins periodically shimmer through their two extra sprites.
                 if sprite_id == tiles::COIN {
                     src_rect
                         .set_y(src_rect.y() + self.coin_anim_row_offset() * self.tile_size as i32);
+                }
+
+                // A death tile the player just hit shows its triggered sprite
+                // (one to the left) until the level resets on respawn.
+                if sprite_id == tiles::DEATH && self.triggered_death_tiles.contains(&(col, row)) {
+                    src_rect.set_x(src_rect.x() - self.tile_size as i32);
                 }
 
                 canvas
@@ -472,6 +516,24 @@ impl TileMap {
                 src_rect.set_y(src_rect.y() + rows * self.tile_size as i32);
             }
 
+            canvas.copy(texture, Some(src_rect), Some(dst_rect)).unwrap();
+        }
+
+        // Coin-collection sparkles play their frames in sequence at the tile
+        // the coin occupied.
+        for effect in &self.coin_effects {
+            let frame = (effect.timer / COIN_COLLECT_FRAME) as usize;
+            let Some(&(src_x, src_y)) = COIN_COLLECT_SPRITES.get(frame) else {
+                continue;
+            };
+            let src_rect =
+                sdl2::rect::Rect::new(src_x, src_y, self.tile_size, self.tile_size);
+            let dst_rect = sdl2::rect::Rect::new(
+                (effect.tile_x as i32 * self.tile_size as i32) - camera_x,
+                (effect.tile_y as i32 * self.tile_size as i32) - camera_y,
+                self.tile_size,
+                self.tile_size,
+            );
             canvas.copy(texture, Some(src_rect), Some(dst_rect)).unwrap();
         }
     }
