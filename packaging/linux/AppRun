@@ -1,0 +1,12 @@
+#!/bin/sh
+# AppImage entry point.
+#
+# The game loads its assets (tilemap.png, character.png, levels/) relative to
+# the current working directory, so we cd into the bundled asset directory
+# before launching. Bundled SDL2 / SDL2_image libraries are found via the
+# binary's rpath ($ORIGIN/../lib); LD_LIBRARY_PATH is set as a belt-and-braces
+# fallback.
+HERE="$(dirname "$(readlink -f "$0")")"
+export LD_LIBRARY_PATH="${HERE}/usr/lib:${LD_LIBRARY_PATH}"
+cd "${HERE}/usr/share/rustgame" || exit 1
+exec "${HERE}/usr/bin/rustgame" "$@"

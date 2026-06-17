@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Platform Game
+Comment=A small SDL2 platformer
+Exec=rustgame
+Icon=rustgame
+Categories=Game;
+Terminal=false
