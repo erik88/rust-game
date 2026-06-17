@@ -534,12 +534,39 @@ impl Player {
             // tolerance and gets trapped inside upward-moving platforms.
             let snap_y = platform_top - self.height as f32;
             if self.check_collision_at(self.x, snap_y, tilemap) {
+                // Upward-moving platform squeezing player into solid above = crush death
+                if snap_y < self.y {
+                    self.is_dead = true;
+                    return;
+                }
                 // Platform is pushing player into obstacle - resolve to edge
                 self.y = self.resolve_y_position(self.x, snap_y, tilemap);
             } else {
                 self.y = snap_y;
             }
             self.vel_y = 0.0;
+        }
+
+        // Downward-moving platform crushing player against solid ground below
+        let on_solid = self.check_collision_at(self.x, self.y + 1.0, tilemap);
+        if on_solid {
+            for platform in &tilemap.moving_platforms {
+                if !platform.active || platform.vel_y <= 0.0 {
+                    continue;
+                }
+                let rect = platform.rect();
+                let h_overlap = self.x + self.width as f32 > rect.position.x
+                    && self.x < rect.position.x + rect.size.x;
+                if !h_overlap {
+                    continue;
+                }
+                // Platform has moved into the player's body from above
+                let platform_bottom = rect.position.y + rect.size.y;
+                if rect.position.y < self.y + self.height as f32 && platform_bottom > self.y {
+                    self.is_dead = true;
+                    return;
+                }
+            }
         }
     }
 
