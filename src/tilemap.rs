@@ -429,13 +429,21 @@ impl TileMap {
                 self.tile_size,
             );
 
-            canvas
-                .copy(
-                    texture,
-                    Some(self.tile_src_rect(platform.tile_type)),
-                    Some(dst_rect),
-                )
-                .unwrap();
+            // A collided platform animates toward destruction: the first
+            // destruction sprite (one row below) shows the moment it collides,
+            // and the second (two rows below) takes over for the final stretch,
+            // telegraphing its imminent removal.
+            let mut src_rect = self.tile_src_rect(platform.tile_type);
+            if let Some(timer) = platform.destroy_timer {
+                let rows = if timer <= PLATFORM_DESTROY_DELAY / 2.0 {
+                    2
+                } else {
+                    1
+                };
+                src_rect.set_y(src_rect.y() + rows * self.tile_size as i32);
+            }
+
+            canvas.copy(texture, Some(src_rect), Some(dst_rect)).unwrap();
         }
     }
 }
