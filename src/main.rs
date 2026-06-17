@@ -34,6 +34,7 @@ fn main() -> Result<(), String> {
     // Initialize SDL2
     let sdl_context = sdl2::init()?;
     let video_subsystem = sdl_context.video()?;
+    let controller_subsystem = sdl_context.game_controller()?;
 
     // Create a window
     let window = video_subsystem
@@ -61,7 +62,7 @@ fn main() -> Result<(), String> {
     let mut engine =
         GameEngine::from_levels_at(level::load_dir(&levels_dir)?, start, OnDeath::Respawn)?;
 
-    let mut input = SdlInput::new(sdl_context.event_pump()?);
+    let mut input = SdlInput::new(sdl_context.event_pump()?, controller_subsystem);
     let mut time_provider = RealTime::new();
 
     // Keep the window title in sync with the current level's name
