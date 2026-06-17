@@ -503,8 +503,9 @@ impl Player {
             let move_x = push_vel_x * delta_time;
             let new_x = self.x + move_x;
             if self.check_collision_at(new_x, self.y, tilemap) {
-                // Platform is pushing player into obstacle - resolve to edge
-                self.x = self.resolve_x_position(new_x, tilemap);
+                // Platform squeezing player into a wall = crush death
+                self.is_dead = true;
+                return;
             } else {
                 self.x = new_x;
             }
