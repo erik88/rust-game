@@ -21,6 +21,12 @@ const PLATFORM_SPEED: f32 = 100.0;
 // destroyed
 const PLATFORM_DESTROY_DELAY: f32 = 1.0;
 
+// Coins idle most of the time, then play a quick two-frame shimmer. The cycle
+// repeats every COIN_ANIM_INTERVAL seconds, with each extra sprite shown for
+// COIN_ANIM_FRAME seconds before the coin lands back on its normal graphic.
+const COIN_ANIM_INTERVAL: f32 = 5.0;
+const COIN_ANIM_FRAME: f32 = 0.25;
+
 #[derive(Clone)]
 pub struct MovingPlatform {
     pub x: f32,
@@ -52,6 +58,7 @@ pub struct TileMap {
     pub moving_platforms: Vec<MovingPlatform>,
     original_platforms: Vec<MovingPlatform>, // Store original platform positions for reset
     periodic_timer: f32,                     // Shared clock for periodic tiles (7/8)
+    coin_timer: f32,                         // Shared clock for the coin shimmer animation
 }
 
 pub struct Tile {
@@ -109,6 +116,7 @@ impl TileMap {
             moving_platforms: platforms.clone(),
             original_platforms: platforms,
             periodic_timer: 0.0,
+            coin_timer: 0.0,
         }
     }
 
@@ -122,6 +130,7 @@ impl TileMap {
         self.disappearing_tiles.clear();
         self.moving_platforms = self.original_platforms.clone();
         self.periodic_timer = 0.0;
+        self.coin_timer = 0.0;
     }
 
     pub fn tiles_of_type(&self, t: u32) -> Vec<Tile> {
@@ -142,6 +151,7 @@ impl TileMap {
         self.update_periodic_tiles(delta_time);
         self.update_crumbling_tiles(delta_time);
         self.update_moving_platforms(delta_time);
+        self.coin_timer = (self.coin_timer + delta_time) % COIN_ANIM_INTERVAL;
     }
 
     /// All periodic tiles swap between their solid and ghost phase on a
@@ -368,6 +378,19 @@ impl TileMap {
         self.periodic_timer >= PERIODIC_TILE_INTERVAL / 2.0
     }
 
+    /// Row offset (in tiles) into the coin's shimmer frames. The animation
+    /// flashes the two extra sprites below the coin at the start of each cycle,
+    /// then rests on the normal graphic (offset 0) for the remainder.
+    fn coin_anim_row_offset(&self) -> i32 {
+        if self.coin_timer < COIN_ANIM_FRAME {
+            1
+        } else if self.coin_timer < COIN_ANIM_FRAME * 2.0 {
+            2
+        } else {
+            0
+        }
+    }
+
     pub fn render(
         &self,
         canvas: &mut WindowCanvas,
@@ -413,6 +436,12 @@ impl TileMap {
                     && self.periodic_in_transition()
                 {
                     src_rect.set_y(src_rect.y() + self.tile_size as i32);
+                }
+
+                // Coins periodically shimmer through their two extra sprites.
+                if sprite_id == tiles::COIN {
+                    src_rect
+                        .set_y(src_rect.y() + self.coin_anim_row_offset() * self.tile_size as i32);
                 }
 
                 canvas
