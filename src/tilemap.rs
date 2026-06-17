@@ -38,6 +38,14 @@ const COIN_DIAMETER: f32 = 24.0;
 const COIN_COLLECT_FRAME: f32 = 0.2;
 const COIN_COLLECT_SPRITES: [(i32, i32); 2] = [(80, 160), (120, 160)];
 
+// Pixel coordinates in tilemap.png of the animation-only sprites that do not
+// correspond to a tile id.
+//
+// The two extra coin sprites shown during the idle shimmer.
+const COIN_SHIMMER_SPRITES: [(i32, i32); 2] = [(40, 160), (40, 200)];
+// The angry-face sprite a death tile shows after it has killed the player.
+const DEATH_HIT_SPRITE: (i32, i32) = (40, 0);
+
 #[derive(Clone)]
 pub struct MovingPlatform {
     pub x: f32,
@@ -411,29 +419,38 @@ impl TileMap {
         self.tiles[tile_y as usize][tile_x as usize]
     }
 
-    /// Source rectangle of a tile's graphic inside tilemap.png
-    fn tile_src_rect(&self, tile_id: u32) -> sdl2::rect::Rect {
-        const TILES_PER_ROW: u32 = 6;
-        let src_x = ((tile_id - 1) % TILES_PER_ROW) * self.tile_size;
-        let mut src_y = ((tile_id - 1) / TILES_PER_ROW) * self.tile_size;
-        // The door and coin sprites were moved down one row in tilemap.png,
-        // so their graphics sit one tile lower than their tile index implies.
-        if matches!(tile_id, tiles::EXIT | tiles::COIN | tiles::EXIT_OPEN) {
-            src_y += self.tile_size;
-        }
-        sdl2::rect::Rect::new(src_x as i32, src_y as i32, self.tile_size, self.tile_size)
+    /// Source rectangle for a 40x40 sprite at the given pixel coordinate in
+    /// tilemap.png.
+    fn sprite_rect(&self, (x, y): (i32, i32)) -> sdl2::rect::Rect {
+        sdl2::rect::Rect::new(x, y, self.tile_size, self.tile_size)
     }
 
-    /// Row offset (in tiles) into the coin's shimmer frames. The animation
-    /// flashes the two extra sprites below the coin at the start of each cycle,
-    /// then rests on the normal graphic (offset 0) for the remainder.
-    fn coin_anim_row_offset(&self) -> i32 {
+    /// Pixel coordinate of the coin sprite to draw this frame: the idle shimmer
+    /// flashes its two extra sprites at the start of each cycle, then rests on
+    /// the normal coin graphic for the remainder.
+    fn coin_sprite(&self) -> (i32, i32) {
         if self.coin_timer < COIN_ANIM_FRAME {
-            1
+            COIN_SHIMMER_SPRITES[0]
         } else if self.coin_timer < COIN_ANIM_FRAME * 2.0 {
-            2
+            COIN_SHIMMER_SPRITES[1]
         } else {
-            0
+            tiles::tile_src_xy(tiles::COIN)
+        }
+    }
+
+    /// Pixel coordinate of a destroying platform's sprite for the given decay
+    /// frame (0 = just collided, 1 = final stretch before removal).
+    fn platform_destroy_sprite(tile_type: u32, frame: usize) -> (i32, i32) {
+        match (tile_type, frame) {
+            (tiles::MOVE_UP, 0) => (80, 80),
+            (tiles::MOVE_UP, _) => (80, 120),
+            (tiles::MOVE_RIGHT, 0) => (120, 80),
+            (tiles::MOVE_RIGHT, _) => (120, 120),
+            (tiles::MOVE_DOWN, 0) => (160, 80),
+            (tiles::MOVE_DOWN, _) => (160, 120),
+            (tiles::MOVE_LEFT, 0) => (200, 80),
+            (tiles::MOVE_LEFT, _) => (200, 120),
+            _ => (0, 0),
         }
     }
 
@@ -474,22 +491,21 @@ impl TileMap {
                     self.tile_size,
                 );
 
-                let mut src_rect = self.tile_src_rect(sprite_id);
-
-                // Coins periodically shimmer through their two extra sprites.
-                if sprite_id == tiles::COIN {
-                    src_rect
-                        .set_y(src_rect.y() + self.coin_anim_row_offset() * self.tile_size as i32);
-                }
-
-                // A death tile the player just hit shows its triggered sprite
-                // (one to the left) until the level resets on respawn.
-                if sprite_id == tiles::DEATH && self.triggered_death_tiles.contains(&(col, row)) {
-                    src_rect.set_x(src_rect.x() - self.tile_size as i32);
-                }
+                // Pick the source sprite: coins shimmer through their extra
+                // sprites, and a death tile the player just hit shows its
+                // angry-face sprite until the level resets on respawn.
+                let sprite = if sprite_id == tiles::COIN {
+                    self.coin_sprite()
+                } else if sprite_id == tiles::DEATH
+                    && self.triggered_death_tiles.contains(&(col, row))
+                {
+                    DEATH_HIT_SPRITE
+                } else {
+                    tiles::tile_src_xy(sprite_id)
+                };
 
                 canvas
-                    .copy(texture, Some(src_rect), Some(dst_rect))
+                    .copy(texture, Some(self.sprite_rect(sprite)), Some(dst_rect))
                     .unwrap();
             }
         }
@@ -502,32 +518,30 @@ impl TileMap {
                 self.tile_size,
             );
 
-            // A collided platform animates toward destruction: the first
-            // destruction sprite (one row below) shows the moment it collides,
-            // and the second (two rows below) takes over for the final stretch,
-            // telegraphing its imminent removal.
-            let mut src_rect = self.tile_src_rect(platform.tile_type);
-            if let Some(timer) = platform.destroy_timer {
-                let rows = if timer <= PLATFORM_DESTROY_DELAY / 2.0 {
-                    2
-                } else {
-                    1
-                };
-                src_rect.set_y(src_rect.y() + rows * self.tile_size as i32);
-            }
+            // A collided platform animates toward destruction, flashing its
+            // first decay sprite the moment it collides and the second for the
+            // final stretch, telegraphing its imminent removal.
+            let sprite = match platform.destroy_timer {
+                Some(timer) => {
+                    let frame = if timer <= PLATFORM_DESTROY_DELAY / 2.0 { 1 } else { 0 };
+                    Self::platform_destroy_sprite(platform.tile_type, frame)
+                }
+                None => tiles::tile_src_xy(platform.tile_type),
+            };
 
-            canvas.copy(texture, Some(src_rect), Some(dst_rect)).unwrap();
+            canvas
+                .copy(texture, Some(self.sprite_rect(sprite)), Some(dst_rect))
+                .unwrap();
         }
 
         // Coin-collection sparkles play their frames in sequence at the tile
         // the coin occupied.
         for effect in &self.coin_effects {
             let frame = (effect.timer / COIN_COLLECT_FRAME) as usize;
-            let Some(&(src_x, src_y)) = COIN_COLLECT_SPRITES.get(frame) else {
+            let Some(&sprite) = COIN_COLLECT_SPRITES.get(frame) else {
                 continue;
             };
-            let src_rect =
-                sdl2::rect::Rect::new(src_x, src_y, self.tile_size, self.tile_size);
+            let src_rect = self.sprite_rect(sprite);
             let dst_rect = sdl2::rect::Rect::new(
                 (effect.tile_x as i32 * self.tile_size as i32) - camera_x,
                 (effect.tile_y as i32 * self.tile_size as i32) - camera_y,

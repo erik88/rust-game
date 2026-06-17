@@ -6,7 +6,7 @@ pub const TILE_SIZE: f32 = 40.0;
 
 pub const EMPTY: u32 = 0;
 pub const SOLID: u32 = 1;
-pub const SOLID_DARK: u32 = 2;
+// Tile id 2 is unused (formerly a dark solid variant).
 /// The player dies when touching this tile
 pub const DEATH: u32 = 3;
 /// Crumbling tile: starts decaying when touched (4 -> 5 -> 6 -> gone)
@@ -33,6 +33,29 @@ pub const COIN: u32 = 14;
 /// Exit door, open phase. This is purely a render substitution for an [`EXIT`]
 /// tile once all coins are gone; it never appears in the tile grid itself.
 pub const EXIT_OPEN: u32 = 19;
+
+/// Top-left pixel coordinate of a tile's graphic within tilemap.png. The sheet
+/// is 240x240 (six 40px tiles per row); these are the literal positions of each
+/// sprite rather than offsets derived from the tile index.
+pub fn tile_src_xy(tile_id: u32) -> (i32, i32) {
+    match tile_id {
+        SOLID => (0, 0),
+        DEATH => (80, 0),
+        CRUMBLE => (120, 0),
+        CRUMBLE_CRACKED => (160, 0),
+        CRUMBLE_VERY_CRACKED => (200, 0),
+        PERIODIC_SOLID => (0, 40),
+        PERIODIC_GHOST => (40, 40),
+        MOVE_UP => (80, 40),
+        MOVE_RIGHT => (120, 40),
+        MOVE_DOWN => (160, 40),
+        MOVE_LEFT => (200, 40),
+        EXIT => (0, 120),
+        COIN => (40, 120),
+        EXIT_OPEN => (0, 160),
+        _ => (0, 0),
+    }
+}
 
 /// Whether the player and moving platforms collide with this tile type
 pub fn is_solid(tile_type: u32) -> bool {

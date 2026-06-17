@@ -78,7 +78,8 @@ impl LevelData {
             for (x, ch) in line.chars().enumerate() {
                 let tile = match ch {
                     '.' | ' ' | '0' => tiles::EMPTY,
-                    '1'..='8' => ch.to_digit(10).unwrap(),
+                    // Tile id 2 is unused, so '2' is not a valid tile character.
+                    '1' | '3'..='8' => ch.to_digit(10).unwrap(),
                     '^' => tiles::MOVE_UP,
                     '>' => tiles::MOVE_RIGHT,
                     'v' => tiles::MOVE_DOWN,
@@ -256,7 +257,7 @@ fn tile_to_char(tile: u32) -> char {
         tiles::MOVE_LEFT => '<',
         tiles::EXIT => 'E',
         tiles::COIN => 'C',
-        n @ 1..=8 => char::from_digit(n, 10).unwrap(),
+        n @ (1 | 3..=8) => char::from_digit(n, 10).unwrap(),
         _ => '.', // EMPTY and anything unexpected
     }
 }
@@ -296,9 +297,9 @@ mod tests {
 
     #[test]
     fn parses_grid_with_all_tile_characters() {
-        let level = LevelData::parse("P.12345678\n^>v<E.....").unwrap();
-        assert_eq!(level.tiles[0], vec![0, 0, 1, 2, 3, 4, 5, 6, 7, 8]);
-        assert_eq!(level.tiles[1], vec![9, 10, 11, 12, 13, 0, 0, 0, 0, 0]);
+        let level = LevelData::parse("P.1345678\n^>v<E....").unwrap();
+        assert_eq!(level.tiles[0], vec![0, 0, 1, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(level.tiles[1], vec![9, 10, 11, 12, 13, 0, 0, 0, 0]);
     }
 
     #[test]
@@ -353,7 +354,7 @@ mod tests {
 
     #[test]
     fn to_text_round_trips_through_parse() {
-        let original = LevelData::parse("name: Round Trip\n\n.P12345678\n^>v<E..1.E").unwrap();
+        let original = LevelData::parse("name: Round Trip\n\n.P1345678\n^>v<E.1.E").unwrap();
         let reparsed = LevelData::parse(&original.to_text()).unwrap();
 
         assert_eq!(reparsed.name, original.name);

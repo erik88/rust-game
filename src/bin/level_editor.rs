@@ -55,7 +55,6 @@ const HUD_TOP: i32 = VIEW_HEIGHT as i32 - HUD_HEIGHT;
 const SLOT: i32 = 40;
 const SLOT_PAD: i32 = 6;
 const HUD_MARGIN_X: i32 = 8;
-const TILES_PER_ROW: u32 = 6;
 
 // Tile area is between top bar and palette HUD
 const TILE_AREA_TOP: i32 = TOP_BAR_HEIGHT;
@@ -119,7 +118,9 @@ fn main() -> Result<(), String> {
 
     let palette: Vec<Tool> = std::iter::once(Tool::Erase)
         .chain(std::iter::once(Tool::Spawn))
-        .chain((1..=tiles::EXIT).map(Tool::Tile))
+        // Tile id 2 is unused, so skip it when listing the paintable tiles.
+        .chain(std::iter::once(Tool::Tile(tiles::SOLID)))
+        .chain((tiles::DEATH..=tiles::EXIT).map(Tool::Tile))
         .chain(std::iter::once(Tool::Tile(tiles::COIN)))
         .collect();
 
@@ -516,18 +517,6 @@ fn palette_slot_at(x: i32, count: usize) -> Option<usize> {
     None
 }
 
-fn tile_src_rect(tile_id: u32) -> Rect {
-    let size = TILE_SIZE as u32;
-    let sx = ((tile_id - 1) % TILES_PER_ROW) * size;
-    let mut sy = ((tile_id - 1) / TILES_PER_ROW) * size;
-    // The door and coin sprites were moved down one row in tilemap.png,
-    // so their graphics sit one tile lower than their tile index implies.
-    if matches!(tile_id, tiles::EXIT | tiles::COIN | tiles::EXIT_OPEN) {
-        sy += size;
-    }
-    Rect::new(sx as i32, sy as i32, size, size)
-}
-
 fn draw_grid(canvas: &mut WindowCanvas, tilemap: &TileMap, camera_x: i32, camera_y: i32) {
     canvas.set_draw_color(Color::RGBA(255, 255, 255, 60));
     let size = tilemap.tile_size as i32;
@@ -616,7 +605,9 @@ fn draw_hud(
 
         match *tool {
             Tool::Tile(n) => {
-                let _ = canvas.copy(tilemap_texture, Some(tile_src_rect(n)), Some(dst));
+                let (sx, sy) = tiles::tile_src_xy(n);
+                let src = Rect::new(sx, sy, TILE_SIZE as u32, TILE_SIZE as u32);
+                let _ = canvas.copy(tilemap_texture, Some(src), Some(dst));
             }
             Tool::Spawn => {
                 let src = Rect::new(0, 0, PLAYER_WIDTH, PLAYER_HEIGHT);
