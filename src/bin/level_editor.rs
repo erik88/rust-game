@@ -520,7 +520,12 @@ fn palette_slot_at(x: i32, count: usize) -> Option<usize> {
 fn tile_src_rect(tile_id: u32) -> Rect {
     let size = TILE_SIZE as u32;
     let sx = ((tile_id - 1) % TILES_PER_ROW) * size;
-    let sy = ((tile_id - 1) / TILES_PER_ROW) * size;
+    let mut sy = ((tile_id - 1) / TILES_PER_ROW) * size;
+    // The door and coin sprites were moved down one row in tilemap.png,
+    // so their graphics sit one tile lower than their tile index implies.
+    if matches!(tile_id, tiles::EXIT | tiles::COIN | tiles::EXIT_OPEN) {
+        sy += size;
+    }
     Rect::new(sx as i32, sy as i32, size, size)
 }
 

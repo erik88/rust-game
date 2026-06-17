@@ -353,8 +353,19 @@ impl TileMap {
     fn tile_src_rect(&self, tile_id: u32) -> sdl2::rect::Rect {
         const TILES_PER_ROW: u32 = 6;
         let src_x = ((tile_id - 1) % TILES_PER_ROW) * self.tile_size;
-        let src_y = ((tile_id - 1) / TILES_PER_ROW) * self.tile_size;
+        let mut src_y = ((tile_id - 1) / TILES_PER_ROW) * self.tile_size;
+        // The door and coin sprites were moved down one row in tilemap.png,
+        // so their graphics sit one tile lower than their tile index implies.
+        if matches!(tile_id, tiles::EXIT | tiles::COIN | tiles::EXIT_OPEN) {
+            src_y += self.tile_size;
+        }
         sdl2::rect::Rect::new(src_x as i32, src_y as i32, self.tile_size, self.tile_size)
+    }
+
+    /// True during the second half of the periodic cycle, when periodic tiles
+    /// show their transition sprite to telegraph the upcoming phase flip.
+    fn periodic_in_transition(&self) -> bool {
+        self.periodic_timer >= PERIODIC_TILE_INTERVAL / 2.0
     }
 
     pub fn render(
@@ -394,8 +405,18 @@ impl TileMap {
                     self.tile_size,
                 );
 
+                // Periodic tiles show a transition sprite (one row below their
+                // normal graphic) during the second half of the cycle, giving
+                // the player a rhythmic cue that the phase is about to flip.
+                let mut src_rect = self.tile_src_rect(sprite_id);
+                if matches!(sprite_id, tiles::PERIODIC_SOLID | tiles::PERIODIC_GHOST)
+                    && self.periodic_in_transition()
+                {
+                    src_rect.set_y(src_rect.y() + self.tile_size as i32);
+                }
+
                 canvas
-                    .copy(texture, Some(self.tile_src_rect(sprite_id)), Some(dst_rect))
+                    .copy(texture, Some(src_rect), Some(dst_rect))
                     .unwrap();
             }
         }
