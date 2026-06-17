@@ -23,6 +23,11 @@ pub struct Player {
     frame: usize,
     frame_time: f32,
     facing_right: bool,
+
+    // Death animation
+    death_frame: usize,
+    death_anim_timer: f32,
+    pub death_anim_done: bool,
 }
 
 pub const PLAYER_WIDTH: u32 = 16;
@@ -34,6 +39,8 @@ const GRAVITY: f32 = 1200.0;
 const JUMP_HOLD_GRAVITY: f32 = 800.0; // Reduced gravity while holding jump
 const JUMP_RELEASE_DAMPING: f32 = 0.5; // Velocity multiplier when jump is released
 const FRAME_DURATION: f32 = 0.25;
+const DEATH_FRAME_DURATION: f32 = 0.15;
+const DEATH_FRAMES: usize = 3;
 // Vertical tolerance for treating the player's feet as standing on a platform.
 // Platforms move before the player each frame, so this must exceed the distance
 // a platform travels in one frame (100 px/s * delta_time), or the player loses
@@ -64,6 +71,9 @@ impl Player {
             frame: 0,
             frame_time: 0.0,
             facing_right: true,
+            death_frame: 0,
+            death_anim_timer: 0.0,
+            death_anim_done: false,
         }
     }
 
@@ -141,6 +151,21 @@ impl Player {
             if !self.check_collision_at(new_x, new_y, tilemap) {
                 self.x = new_x;
                 self.y = new_y;
+            }
+        }
+    }
+
+    pub fn update_death_animation(&mut self, delta_time: f32) {
+        if self.death_anim_done {
+            return;
+        }
+        self.death_anim_timer += delta_time;
+        if self.death_anim_timer >= DEATH_FRAME_DURATION {
+            self.death_anim_timer -= DEATH_FRAME_DURATION;
+            if self.death_frame < DEATH_FRAMES - 1 {
+                self.death_frame += 1;
+            } else {
+                self.death_anim_done = true;
             }
         }
     }
@@ -529,6 +554,9 @@ impl Player {
         self.frame_time = 0.0;
         self.facing_right = true;
         self.is_dead = false;
+        self.death_frame = 0;
+        self.death_anim_timer = 0.0;
+        self.death_anim_done = false;
     }
 
     pub fn render(
@@ -538,12 +566,12 @@ impl Player {
         camera_x: i32,
         camera_y: i32,
     ) {
-        let src_rect = sdl2::rect::Rect::new(
-            (self.frame * self.width as usize) as i32,
-            0,
-            self.width,
-            self.height,
-        );
+        let (src_x, src_y) = if self.is_dead {
+            ((self.death_frame * self.width as usize) as i32, self.height as i32)
+        } else {
+            ((self.frame * self.width as usize) as i32, 0)
+        };
+        let src_rect = sdl2::rect::Rect::new(src_x, src_y, self.width, self.height);
 
         let dst_rect = sdl2::rect::Rect::new(
             self.x as i32 - camera_x,

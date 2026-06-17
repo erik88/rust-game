@@ -68,6 +68,21 @@ impl GameEngine {
             return;
         }
 
+        // If the player is mid-death-animation, advance it and wait for it to finish
+        if self.player.is_dead {
+            self.player.update_death_animation(delta_time);
+            if self.player.death_anim_done {
+                match self.on_death {
+                    OnDeath::Stop => self.stopped = true,
+                    OnDeath::Respawn => {
+                        self.player.reset();
+                        self.tilemap.reset();
+                    }
+                }
+            }
+            return;
+        }
+
         // During a level transition the world is frozen
         if let Some(timer) = &mut self.transition_timer {
             *timer -= delta_time;
@@ -96,15 +111,6 @@ impl GameEngine {
         if self.fallen_outside_playable_area(&self.player) || self.is_player_touching_deadly_tile()
         {
             self.player.is_dead = true;
-            match self.on_death {
-                OnDeath::Stop => {
-                    self.stopped = true;
-                }
-                OnDeath::Respawn => {
-                    self.player.reset();
-                    self.tilemap.reset();
-                }
-            }
             return;
         }
 
