@@ -1,3 +1,8 @@
+// On Windows release builds, use the GUI subsystem so launching the game does
+// not also open a console window. Debug builds keep the console for panic/log
+// output, and this has no effect on other platforms.
+#![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
+
 use rustgamex::engine::{GameEngine, OnDeath};
 use rustgamex::input::{InputSource, SdlInput};
 use rustgamex::level;

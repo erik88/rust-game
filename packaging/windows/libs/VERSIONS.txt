@@ -1,0 +1,2 @@
+SDL2 2.32.10
+Source: official MinGW dev release from github.com/libsdl-org

@@ -1,0 +1,20 @@
+# Cross-compilation settings for the Windows (MinGW) target.
+#
+# Build with:  cargo build --release --target x86_64-pc-windows-gnu --bin rustgame
+# (or just run ./packaging/windows/build.sh, which also copies the runtime DLL).
+#
+# Linux/native builds do not read this target section, so they are unaffected.
+#
+# SDL2 is linked dynamically against the vendored MinGW import library in
+# packaging/windows/libs/lib (versions in packaging/windows/libs/VERSIONS.txt).
+# The matching SDL2.dll in packaging/windows/libs/bin must ship next to the .exe.
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"
+ar = "x86_64-w64-mingw32-ar"
+rustflags = [
+    # Find the vendored SDL2 import library.
+    "-L", "native=packaging/windows/libs/lib",
+    # Statically link libgcc / winpthreads so they don't also need to be shipped
+    # as DLLs (keeps the runtime down to just SDL2.dll).
+    "-C", "target-feature=+crt-static",
+]
