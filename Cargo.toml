@@ -5,7 +5,8 @@ edition = "2024"
 default-run = "rustgame"
 
 [dependencies]
-sdl2 = { version = "0.38.0", features = ["image"] }
+sdl2 = { version = "0.38.0" }
+png = "0.17"
 
 [lib]
 name = "rustgamex"

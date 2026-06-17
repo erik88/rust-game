@@ -23,7 +23,6 @@
 //! - Esc / Q      : quit
 
 use sdl2::event::Event;
-use sdl2::image::{InitFlag, LoadTexture};
 use sdl2::keyboard::{Keycode, Mod};
 use sdl2::mouse::MouseButton;
 use sdl2::pixels::Color;
@@ -33,6 +32,7 @@ use sdl2::render::{Texture, WindowCanvas};
 use rustgamex::level::{self, Edge, LevelData};
 use rustgamex::player::{PLAYER_HEIGHT, PLAYER_WIDTH, Player};
 use rustgamex::tilemap::TileMap;
+use rustgamex::texture::load_png_texture;
 use rustgamex::tiles::{self, TILE_SIZE};
 use rustgamex::time::{RealTime, TimeProvider};
 use std::path::PathBuf;
@@ -127,7 +127,6 @@ fn main() -> Result<(), String> {
 
     let sdl_context = sdl2::init()?;
     let video_subsystem = sdl_context.video()?;
-    let _image_context = sdl2::image::init(InitFlag::PNG)?;
 
     let window = video_subsystem
         .window("Level Editor", VIEW_WIDTH, VIEW_HEIGHT)
@@ -144,8 +143,8 @@ fn main() -> Result<(), String> {
     canvas.set_blend_mode(sdl2::render::BlendMode::Blend);
 
     let texture_creator = canvas.texture_creator();
-    let character_texture = texture_creator.load_texture("character.png")?;
-    let tilemap_texture = texture_creator.load_texture("tilemap.png")?;
+    let character_texture = load_png_texture(&texture_creator, "character.png")?;
+    let tilemap_texture = load_png_texture(&texture_creator, "tilemap.png")?;
 
     let mut event_pump = sdl_context.event_pump()?;
     let mut time_provider = RealTime::new();

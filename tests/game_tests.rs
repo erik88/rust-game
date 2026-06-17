@@ -65,15 +65,11 @@ impl TestRunner {
 
     /// Create a new test runner with visualization enabled
     fn new_visualized(engine: GameEngine) -> Self {
-        use sdl2::image::{InitFlag, LoadTexture};
+        use rustgamex::texture::load_png_texture;
 
         // Initialize SDL2
         let sdl_context = sdl2::init().expect("Failed to initialize SDL2");
         let video_subsystem = sdl_context.video().expect("Failed to get video subsystem");
-
-        // Initialize SDL2_image with PNG support
-        let _image_context =
-            sdl2::image::init(InitFlag::PNG).expect("Failed to initialize SDL2_image");
 
         // Create a window
         let window = video_subsystem
@@ -94,12 +90,10 @@ impl TestRunner {
 
         // Load textures - we need to leak them to get 'static lifetime
         // This is okay for tests since they're short-lived
-        let character_texture = texture_creator
-            .load_texture("character.png")
-            .expect("Failed to load character.png");
-        let tilemap_texture = texture_creator
-            .load_texture("tilemap.png")
-            .expect("Failed to load tilemap.png");
+        let character_texture =
+            load_png_texture(&texture_creator, "character.png").expect("Failed to load character.png");
+        let tilemap_texture =
+            load_png_texture(&texture_creator, "tilemap.png").expect("Failed to load tilemap.png");
 
         // Transmute to 'static - this is safe because we're holding the SDL context
         let character_texture: sdl2::render::Texture<'static> =

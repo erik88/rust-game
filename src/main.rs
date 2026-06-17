@@ -1,8 +1,7 @@
-use sdl2::image::{InitFlag, LoadTexture};
-
 use rustgamex::engine::{GameEngine, OnDeath};
 use rustgamex::input::{InputSource, SdlInput};
 use rustgamex::level;
+use rustgamex::texture::load_png_texture;
 use rustgamex::time::{RealTime, TimeProvider};
 
 fn parse_args() -> (usize, String) {
@@ -31,9 +30,6 @@ fn main() -> Result<(), String> {
     let sdl_context = sdl2::init()?;
     let video_subsystem = sdl_context.video()?;
 
-    // Initialize SDL2_image with PNG support
-    let _image_context = sdl2::image::init(InitFlag::PNG)?;
-
     // Create a window
     let window = video_subsystem
         .window("Platform Game", 800, 600)
@@ -52,8 +48,8 @@ fn main() -> Result<(), String> {
     let texture_creator = canvas.texture_creator();
 
     // Load textures
-    let character_texture = texture_creator.load_texture("character.png")?;
-    let tilemap_texture = texture_creator.load_texture("tilemap.png")?;
+    let character_texture = load_png_texture(&texture_creator, "character.png")?;
+    let tilemap_texture = load_png_texture(&texture_creator, "tilemap.png")?;
 
     // Create game engine with all levels from the levels/ directory
     let (start, levels_dir) = parse_args();
