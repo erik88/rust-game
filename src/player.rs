@@ -78,6 +78,73 @@ impl Player {
         )
     }
 
+    /// If the player is slightly inside a solid tile (e.g. a periodic tile that
+    /// just flipped from ghost to solid), push them out along the axis of least
+    /// penetration. Only acts when the penetration depth is small enough that
+    /// the player clearly just grazed the edge; larger overlaps are left alone.
+    pub fn try_unstick(&mut self, tilemap: &TileMap) {
+        const MAX_UNSTICK_DEPTH: f32 = 8.0;
+
+        if !self.check_collision_at(self.x, self.y, tilemap) {
+            return;
+        }
+
+        let tile_size = tilemap.tile_size as f32;
+        let player_right = self.x + self.width as f32;
+        let player_bottom = self.y + self.height as f32;
+
+        let left_tile = (self.x / tile_size).floor() as i32;
+        let right_tile = ((player_right - 1.0) / tile_size).floor() as i32;
+        let top_tile = (self.y / tile_size).floor() as i32;
+        let bottom_tile = ((player_bottom - 1.0) / tile_size).floor() as i32;
+
+        let mut best_depth = f32::INFINITY;
+        let mut best_dx = 0.0f32;
+        let mut best_dy = 0.0f32;
+
+        for ty in top_tile..=bottom_tile {
+            for tx in left_tile..=right_tile {
+                if !tilemap.is_solid(tx, ty) {
+                    continue;
+                }
+
+                let tile_left = tx as f32 * tile_size;
+                let tile_right = tile_left + tile_size;
+                let tile_top = ty as f32 * tile_size;
+                let tile_bottom = tile_top + tile_size;
+
+                // Penetration depth in each direction
+                let candidates = [
+                    (player_right - tile_left, -(player_right - tile_left), 0.0f32),
+                    (tile_right - self.x, tile_right - self.x, 0.0f32),
+                    (player_bottom - tile_top, 0.0f32, -(player_bottom - tile_top)),
+                    (tile_bottom - self.y, 0.0f32, tile_bottom - self.y),
+                ];
+
+                if let Some(&(depth, dx, dy)) = candidates
+                    .iter()
+                    .filter(|&&(d, _, _)| d > 0.0)
+                    .min_by(|a, b| a.0.partial_cmp(&b.0).unwrap())
+                {
+                    if depth < best_depth {
+                        best_depth = depth;
+                        best_dx = dx;
+                        best_dy = dy;
+                    }
+                }
+            }
+        }
+
+        if best_depth <= MAX_UNSTICK_DEPTH {
+            let new_x = self.x + best_dx;
+            let new_y = self.y + best_dy;
+            if !self.check_collision_at(new_x, new_y, tilemap) {
+                self.x = new_x;
+                self.y = new_y;
+            }
+        }
+    }
+
     pub fn update(&mut self, input: &InputState, tilemap: &mut TileMap, delta_time: f32) {
         // Store previous ground state
         self.was_on_ground = self.on_ground;

@@ -81,6 +81,10 @@ impl GameEngine {
         // Update tilemap (for disappearing tiles and moving platforms)
         self.tilemap.update(delta_time);
 
+        // Eject player if a tile that just became solid (e.g. periodic tile
+        // flipping ghost → solid) is now slightly overlapping them
+        self.player.try_unstick(&self.tilemap);
+
         // Update player
         self.player.update(input, &mut self.tilemap, delta_time);
 
@@ -184,3 +188,4 @@ impl GameEngine {
         false
     }
 }
+

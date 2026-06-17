@@ -1055,4 +1055,60 @@ mod tests {
             "Player should still be riding the platform"
         );
     }
+
+    #[test]
+    fn test_unstick_lets_player_walk_away_from_newly_solid_periodic_tile() {
+        // Layout (3 cols x 2 rows, tile size 40 px):
+        //   col:  0    1    2
+        // row 0: [ ]  [8]  [ ]   <- tile (1,0) starts as PERIODIC_GHOST
+        // row 1: [1]  [1]  [1]   <- solid floor
+        //
+        // Player (16 x 38 px) is placed so his right edge is 4 px inside
+        // the ghost tile: x = 40 + 4 - 16 = 28, y = 2 (well above the floor).
+        // Then the tile is flipped to PERIODIC_SOLID manually, mimicking the
+        // moment the periodic timer fires. try_unstick must eject the player
+        // leftward, after which walking left should succeed.
+
+        use rustgamex::player::{PLAYER_HEIGHT, PLAYER_WIDTH};
+        use rustgamex::tiles;
+
+        const TILE_SIZE: f32 = 40.0;
+        const OVERLAP: f32 = 4.0;
+
+        let player_x = TILE_SIZE + OVERLAP - PLAYER_WIDTH as f32; // 28.0
+        let player_y = TILE_SIZE - PLAYER_HEIGHT as f32 - 1.0; // sitting in row 0, just above floor
+
+        let mut tilemap = create_tilemap(vec![
+            vec![tiles::EMPTY, tiles::PERIODIC_GHOST, tiles::EMPTY],
+            vec![tiles::SOLID, tiles::SOLID, tiles::SOLID],
+        ]);
+
+        // Simulate the periodic flip: ghost → solid while player is inside
+        tilemap.tiles[0][1] = tiles::PERIODIC_SOLID;
+
+        let mut player = Player::new(player_x, player_y);
+
+        // try_unstick should push the player left so his right edge leaves the tile
+        player.try_unstick(&tilemap);
+
+        assert!(
+            player.x + PLAYER_WIDTH as f32 <= TILE_SIZE,
+            "right edge {:.1} should be <= {TILE_SIZE} after unstick",
+            player.x + PLAYER_WIDTH as f32,
+        );
+
+        // Walking left must move the player further away, not leave him stuck
+        let input = InputState {
+            left: true,
+            ..InputState::default()
+        };
+        let x_before = player.x;
+        player.update(&input, &mut tilemap, 1.0 / 60.0);
+
+        assert!(
+            player.x < x_before,
+            "player should have moved left after unstick, but x stayed at {:.1}",
+            player.x,
+        );
+    }
 }
