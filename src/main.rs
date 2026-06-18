@@ -30,7 +30,28 @@ fn set_window_title(canvas: &mut sdl2::render::WindowCanvas, engine: &GameEngine
     let _ = canvas.window_mut().set_title(&title);
 }
 
+/// When launched from a macOS `.app` bundle (e.g. double-clicked in Finder),
+/// the working directory is `/`, so the relative asset paths (character.png,
+/// tilemap.png, levels/) don't resolve. In that case switch into the bundle's
+/// Resources directory, where the build script places the assets. During normal
+/// `cargo run` development there is no bundle, so this is a no-op.
+#[cfg(target_os = "macos")]
+fn chdir_to_bundle_resources() {
+    if let Ok(exe) = std::env::current_exe() {
+        // exe lives at <App>.app/Contents/MacOS/<binary>
+        if let Some(macos_dir) = exe.parent() {
+            let resources = macos_dir.join("../Resources");
+            if resources.join("tilemap.png").exists() {
+                let _ = std::env::set_current_dir(&resources);
+            }
+        }
+    }
+}
+
 fn main() -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    chdir_to_bundle_resources();
+
     // Initialize SDL2
     let sdl_context = sdl2::init()?;
     let video_subsystem = sdl_context.video()?;

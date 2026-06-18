@@ -8,6 +8,13 @@ default-run = "rustgame"
 sdl2 = { version = "0.38.0" }
 png = "0.17"
 
+[features]
+# Compile SDL2 from source and link it statically, so the binary has no external
+# libSDL2 dependency and can ship inside a self-contained .app bundle. Enabled by
+# packaging/macos/build.sh via `--features bundle-sdl2`; requires `cmake`. Normal
+# development (`cargo run`) leaves this off and links the system/Homebrew SDL2.
+bundle-sdl2 = ["sdl2/bundled", "sdl2/static-link"]
+
 [lib]
 name = "rustgamex"
 path = "src/lib.rs"
