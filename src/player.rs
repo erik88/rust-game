@@ -209,8 +209,16 @@ impl Player {
             self.vel_x = 0.0;
         }
 
-        // Check and adjust vertical movement
-        if self.check_collision_at(new_x, new_y, tilemap) {
+        // Check and adjust vertical movement. Skip this when the player is
+        // embedded in the *side* of a horizontally-moving platform: the tilemap
+        // updates before the player, so a right/left-moving platform shoves into
+        // the player's body before he gets a chance to move. Treating that side
+        // overlap as a vertical collision would zero vel_y and hold the player
+        // aloft ("surfing" in the air). Let gravity keep pulling him down and
+        // leave the horizontal ejection to handle_platforms().
+        if self.check_collision_at(new_x, new_y, tilemap)
+            && !self.embedded_in_moving_platform(new_x, self.y, tilemap)
+        {
             // Collision detected - try to slide to the edge of the obstacle
             new_y = self.resolve_y_position(new_x, new_y, tilemap);
             self.vel_y = 0.0;
@@ -284,6 +292,24 @@ impl Player {
         near_platform_top(self.y + self.height as f32, rect.position.y)
             && self.x + self.width as f32 > rect.position.x
             && self.x < rect.position.x + rect.size.x
+    }
+
+    /// True if the player at `(x, y)` overlaps a horizontally-moving platform
+    /// from the side rather than resting on its top. This happens because the
+    /// platform moves before the player each frame and shoves into his body; the
+    /// overlap must not be mistaken for a floor (see the vertical-collision check
+    /// in `update`), or the player surfs in the air instead of falling.
+    fn embedded_in_moving_platform(&self, x: f32, y: f32, tilemap: &TileMap) -> bool {
+        let player_rect = Rect::new(
+            Vec2d::new(x, y),
+            Vec2d::new(self.width as f32, self.height as f32),
+        );
+        tilemap.moving_platforms.iter().any(|platform| {
+            platform.active
+                && platform.vel_x.abs() > 0.01
+                && !near_platform_top(y + self.height as f32, platform.y)
+                && player_rect.intersects(&platform.rect())
+        })
     }
 
     /// True if the player's whole width lies within the platform's, i.e. he is
@@ -619,5 +645,77 @@ impl Player {
                 false,
             )
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::input::InputState;
+    use crate::tiles;
+
+    /// Build a 10x10 level of open air with a single right-moving platform
+    /// (tile 10) occupying tile (2, 2) — its rect spans x in [80, 120],
+    /// y in [80, 120]. The platform is activated and starts moving right.
+    fn map_with_active_right_platform() -> TileMap {
+        let mut grid = vec![vec![tiles::EMPTY; 10]; 10];
+        grid[2][2] = tiles::MOVE_RIGHT;
+        let mut tilemap = TileMap::from_data(grid);
+        tilemap.activate_platform(2, 2);
+        tilemap
+    }
+
+    /// Regression test: a player pressing *into* a horizontally-moving platform
+    /// while airborne must keep falling. The platform moves before the player
+    /// each frame and shoves into his side; that side overlap previously got
+    /// mistaken for a floor, zeroing vel_y and letting the player "surf" in the
+    /// air. See `embedded_in_moving_platform` and the vertical-collision check.
+    #[test]
+    fn player_falls_while_pushed_by_horizontal_platform() {
+        let mut tilemap = map_with_active_right_platform();
+
+        // Spawn the player airborne, flush against the platform's right edge
+        // (platform right edge = 120) with no ground anywhere beneath him.
+        let mut player = Player::new(120.0, 85.0);
+        let start_y = player.y;
+
+        // Hold left, i.e. push against the oncoming right-moving platform.
+        let input = InputState {
+            left: true,
+            ..Default::default()
+        };
+
+        let dt = 1.0 / 60.0;
+        // Mirror the engine loop: the tilemap (platforms) updates before the player.
+        // After a few frames, while the player still overlaps the platform
+        // vertically, he should have been carried sideways (the intended "pushed
+        // ahead" behaviour) *and* dropped from gravity rather than hovering.
+        for _ in 0..5 {
+            tilemap.update(dt);
+            player.update(&input, &mut tilemap, dt);
+        }
+        assert!(
+            player.x > 120.0,
+            "player should be pushed right by the platform, but x = {}",
+            player.x
+        );
+        assert!(
+            player.y > start_y,
+            "player should already be falling while pushed, but y went {} -> {}",
+            start_y,
+            player.y
+        );
+
+        // Letting it run on, he keeps accelerating downward instead of surfing.
+        for _ in 0..25 {
+            tilemap.update(dt);
+            player.update(&input, &mut tilemap, dt);
+        }
+        assert!(
+            player.y > start_y + 20.0,
+            "player should keep falling, but y went {} -> {}",
+            start_y,
+            player.y
+        );
     }
 }
