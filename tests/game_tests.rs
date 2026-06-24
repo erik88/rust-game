@@ -1105,4 +1105,50 @@ mod tests {
             player.x,
         );
     }
+
+    #[test]
+    fn test_player_rides_path_block_along_open_path() {
+        use rustgamex::level::{LevelData, PathBlock};
+
+        // A horizontal open path block at tile row 5 (top edge at y=200),
+        // travelling between tiles (1,5) and (8,5). The player starts just above
+        // the block's start so he falls onto it and is carried to the right.
+        let grid = vec![vec![0u32; 12]; 12];
+        let level = LevelData {
+            name: String::new(),
+            spawn: (44.0, 150.0),
+            tiles: grid,
+            path_blocks: vec![PathBlock {
+                points: vec![(1, 5), (8, 5)],
+                closed: false,
+            }],
+        };
+
+        let mut runner = TestRunner::new_with(
+            Player::new(level.spawn.0, level.spawn.1),
+            TileMap::from_level(&level),
+        );
+
+        // Fall and settle onto the block (top edge at y=200).
+        runner.run_frames(8);
+        assert!(
+            runner.engine().player().on_ground,
+            "player should have landed on the path block"
+        );
+        let landed = runner.engine().player().position();
+
+        // The block moves at 100 px/s; 30 frames (~0.5s) carries the player right.
+        runner.run_frames(30);
+        let moved = runner.engine().player().position() - landed;
+        assert!(
+            moved.x > 40.0,
+            "player should be carried right by the path block (moved {} px)",
+            moved.x
+        );
+        assert!(
+            moved.y.abs() < 2.0,
+            "player should not drift vertically while riding (moved {} px)",
+            moved.y
+        );
+    }
 }

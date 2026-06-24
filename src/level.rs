@@ -5,11 +5,18 @@
 //!
 //! ```text
 //! name: First Steps
+//! block: 1,1 4,1 4,3 1,3 loop
 //!
 //! ..........
 //! .P.....E..
 //! 1111111111
 //! ```
+//!
+//! A `block:` header defines a platform that moves along a path of control
+//! points (`x,y` tile coordinates). Consecutive points must be strictly
+//! horizontal or vertical neighbours. A trailing `loop` makes the path a closed
+//! cycle; without it the block reverses direction at each end. There may be any
+//! number of `block:` lines, one per moving block.
 //!
 //! Grid characters:
 //!
@@ -28,6 +35,20 @@
 use crate::player::{PLAYER_HEIGHT, PLAYER_WIDTH};
 use crate::tiles::{self, TILE_SIZE};
 
+/// A platform that travels along a fixed path of control points. Defined by a
+/// `block:` header line rather than a grid character, because the path is an
+/// ordered sequence the flat tile grid cannot express.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PathBlock {
+    /// Control points in tile coordinates, in path order. Consecutive points
+    /// (including the wrap from last to first when `closed`) are always strictly
+    /// horizontal or vertical neighbours.
+    pub points: Vec<(usize, usize)>,
+    /// `true` for a closed loop; `false` for an open path the block bounces back
+    /// and forth along.
+    pub closed: bool,
+}
+
 /// Parsed level, independent of how it was stored on disk.
 #[derive(Clone, Debug)]
 pub struct LevelData {
@@ -35,11 +56,14 @@ pub struct LevelData {
     /// Player spawn position in pixels (top-left corner of the player).
     pub spawn: (f32, f32),
     pub tiles: Vec<Vec<u32>>,
+    /// Path-following moving blocks defined by `block:` header lines.
+    pub path_blocks: Vec<PathBlock>,
 }
 
 impl LevelData {
     pub fn parse(text: &str) -> Result<LevelData, String> {
         let mut name = String::new();
+        let mut path_blocks: Vec<PathBlock> = Vec::new();
         let mut grid_lines: Vec<&str> = Vec::new();
         let mut in_grid = false;
 
@@ -52,6 +76,7 @@ impl LevelData {
                 if let Some((key, value)) = trimmed.split_once(':') {
                     match key.trim() {
                         "name" => name = value.trim().to_string(),
+                        "block" => path_blocks.push(parse_path_block(value.trim())?),
                         other => return Err(format!("unknown header key '{}'", other)),
                     }
                     continue;
@@ -115,7 +140,12 @@ impl LevelData {
 
         let spawn = spawn.ok_or("level has no spawn point 'P'")?;
 
-        Ok(LevelData { name, spawn, tiles })
+        Ok(LevelData {
+            name,
+            spawn,
+            tiles,
+            path_blocks,
+        })
     }
 
     /// Serialize the level back into the ASCII file format that [`parse`]
@@ -126,10 +156,33 @@ impl LevelData {
         let (spawn_x, spawn_y) = self.spawn_tile();
 
         let mut out = String::new();
+        let mut has_header = false;
         if !self.name.is_empty() {
             out.push_str("name: ");
             out.push_str(&self.name);
-            out.push_str("\n\n");
+            out.push('\n');
+            has_header = true;
+        }
+        for block in &self.path_blocks {
+            // A block needs at least two points to be a path; skip any partial
+            // block (e.g. one still being drawn in the editor) so the output
+            // always parses back.
+            if block.points.len() < 2 {
+                continue;
+            }
+            out.push_str("block:");
+            for (x, y) in &block.points {
+                out.push_str(&format!(" {},{}", x, y));
+            }
+            if block.closed {
+                out.push_str(" loop");
+            }
+            out.push('\n');
+            has_header = true;
+        }
+        // Blank line separating the header from the tile grid.
+        if has_header {
+            out.push('\n');
         }
         for (y, row) in self.tiles.iter().enumerate() {
             for (x, &tile) in row.iter().enumerate() {
@@ -247,6 +300,53 @@ pub enum Edge {
     Right,
 }
 
+/// Parse the value of a `block:` header into a [`PathBlock`]. The value is a
+/// whitespace-separated list of `x,y` control points, optionally ending with the
+/// word `loop` to close the path. Consecutive points (and the closing wrap, when
+/// looped) must be strictly horizontal or vertical neighbours.
+fn parse_path_block(spec: &str) -> Result<PathBlock, String> {
+    let mut tokens: Vec<&str> = spec.split_whitespace().collect();
+    let closed = tokens.last() == Some(&"loop");
+    if closed {
+        tokens.pop();
+    }
+    if tokens.len() < 2 {
+        return Err("block path needs at least two control points".to_string());
+    }
+
+    let mut points = Vec::with_capacity(tokens.len());
+    for tok in tokens {
+        let (xs, ys) = tok
+            .split_once(',')
+            .ok_or_else(|| format!("invalid control point '{}', expected 'x,y'", tok))?;
+        let x = xs
+            .parse::<usize>()
+            .map_err(|_| format!("invalid x in control point '{}'", tok))?;
+        let y = ys
+            .parse::<usize>()
+            .map_err(|_| format!("invalid y in control point '{}'", tok))?;
+        points.push((x, y));
+    }
+
+    // Every segment (including the closing wrap) must move along exactly one
+    // axis: same x or same y, but not both (which would be a zero-length
+    // segment) and not neither (a diagonal).
+    let n = points.len();
+    let segments = if closed { n } else { n - 1 };
+    for i in 0..segments {
+        let a = points[i];
+        let b = points[(i + 1) % n];
+        if (a.0 == b.0) == (a.1 == b.1) {
+            return Err(format!(
+                "control points {},{} and {},{} must be strictly horizontal or vertical neighbours",
+                a.0, a.1, b.0, b.1
+            ));
+        }
+    }
+
+    Ok(PathBlock { points, closed })
+}
+
 /// Map a tile code back to its level-file character (inverse of the match in
 /// [`LevelData::parse`]).
 fn tile_to_char(tile: u32) -> char {
@@ -354,12 +454,52 @@ mod tests {
 
     #[test]
     fn to_text_round_trips_through_parse() {
-        let original = LevelData::parse("name: Round Trip\n\n.P1345678\n^>v<E.1.E").unwrap();
+        let original = LevelData::parse(
+            "name: Round Trip\nblock: 1,1 4,1 4,3 1,3 loop\nblock: 2,5 2,7\n\n.P1345678\n^>v<E.1.E",
+        )
+        .unwrap();
         let reparsed = LevelData::parse(&original.to_text()).unwrap();
 
         assert_eq!(reparsed.name, original.name);
         assert_eq!(reparsed.spawn, original.spawn);
         assert_eq!(reparsed.tiles, original.tiles);
+        assert_eq!(reparsed.path_blocks, original.path_blocks);
+    }
+
+    #[test]
+    fn parses_open_and_closed_path_blocks() {
+        let level =
+            LevelData::parse("block: 1,1 4,1 4,3 1,3 loop\nblock: 2,5 2,7\n\nP.\n11").unwrap();
+        assert_eq!(level.path_blocks.len(), 2);
+        assert_eq!(level.path_blocks[0].points, vec![(1, 1), (4, 1), (4, 3), (1, 3)]);
+        assert!(level.path_blocks[0].closed);
+        assert_eq!(level.path_blocks[1].points, vec![(2, 5), (2, 7)]);
+        assert!(!level.path_blocks[1].closed);
+    }
+
+    #[test]
+    fn rejects_diagonal_path_segment() {
+        let err = LevelData::parse("block: 1,1 3,3\n\nP.\n11").unwrap_err();
+        assert!(err.contains("horizontal or vertical"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn rejects_closing_wrap_that_is_not_axis_aligned() {
+        // 1,1 -> 4,1 -> 4,3 are fine, but the wrap 4,3 -> 1,1 is diagonal.
+        let err = LevelData::parse("block: 1,1 4,1 4,3 loop\n\nP.\n11").unwrap_err();
+        assert!(err.contains("horizontal or vertical"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn rejects_zero_length_path_segment() {
+        let err = LevelData::parse("block: 2,2 2,2\n\nP.\n11").unwrap_err();
+        assert!(err.contains("horizontal or vertical"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn rejects_path_block_with_too_few_points() {
+        let err = LevelData::parse("block: 2,2\n\nP.\n11").unwrap_err();
+        assert!(err.contains("at least two"), "unexpected error: {}", err);
     }
 
     #[test]

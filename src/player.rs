@@ -234,8 +234,7 @@ impl Player {
         // Also check if standing on a platform
         if !self.on_ground && self.vel_y >= 0.0 {
             self.on_ground = tilemap
-                .moving_platforms
-                .iter()
+                .platforms()
                 .any(|platform| self.feet_on_platform(platform));
         }
 
@@ -304,7 +303,7 @@ impl Player {
             Vec2d::new(x, y),
             Vec2d::new(self.width as f32, self.height as f32),
         );
-        tilemap.moving_platforms.iter().any(|platform| {
+        tilemap.platforms().any(|platform| {
             platform.active
                 && platform.vel_x.abs() > 0.01
                 && !near_platform_top(y + self.height as f32, platform.y)
@@ -420,7 +419,7 @@ impl Player {
             Vec2d::new(self.width as f32, self.height as f32),
         );
 
-        for platform in &tilemap.moving_platforms {
+        for platform in tilemap.platforms() {
             // Exception: if player's feet are on or near the top surface of the platform,
             // don't treat it as a collision (allows walking onto platform from the side)
             let feet_on_top = near_platform_top(y + self.height as f32, platform.y);
@@ -470,7 +469,7 @@ impl Player {
         let mut riding: Option<(f32, f32)> = None;
         let mut platform_push: Option<f32> = None; // Horizontal push from platform beside player
 
-        for platform in &tilemap.moving_platforms {
+        for platform in tilemap.platforms() {
             // Check if player's feet are touching the top of the platform
             if self.feet_on_platform(platform) && self.vel_y >= 0.0 {
                 // Player is standing on this platform. Activate it once he is
@@ -577,7 +576,7 @@ impl Player {
         // Downward-moving platform crushing player against solid ground below
         let on_solid = self.check_collision_at(self.x, self.y + 1.0, tilemap);
         if on_solid {
-            for platform in &tilemap.moving_platforms {
+            for platform in tilemap.platforms() {
                 if !platform.active || platform.vel_y <= 0.0 {
                     continue;
                 }

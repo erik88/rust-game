@@ -54,7 +54,7 @@ impl GameEngine {
         let first = levels.get(start).ok_or("no levels given")?;
         let mut engine = Self::new_with(
             Player::new(first.spawn.0, first.spawn.1),
-            TileMap::from_data(first.tiles.clone()),
+            TileMap::from_level(first),
             on_death,
         );
         engine.levels = levels;
@@ -153,7 +153,7 @@ impl GameEngine {
         self.current_level = (self.current_level + 1) % self.levels.len();
         let level = &self.levels[self.current_level];
         self.player = Player::new(level.spawn.0, level.spawn.1);
-        self.tilemap = TileMap::from_data(level.tiles.clone());
+        self.tilemap = TileMap::from_level(level);
     }
 
     pub fn fallen_outside_playable_area(&self, p: &Player) -> bool {

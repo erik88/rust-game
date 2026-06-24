@@ -21,6 +21,20 @@
 //! - G            : toggle the grid overlay
 //! - Ctrl+S       : save the current level back to its file
 //! - Esc / Q      : quit
+//!
+//! Path-block editing (the moving blocks defined by `block:` headers):
+//! - B : toggle path-edit mode (or click the path button in the toolbar)
+//! - Left-click an empty cell : append a control point to the active block, snapped to stay horizontal/vertical from the previous one
+//! - Left-click a control point : select its block, and drag it if it is an open path's endpoint
+//! - Left-click an edge (between two points) : drag the whole edge perpendicular to itself
+//! - Right-click a control point : delete it
+//! - N : start a new block (the next click places its first point)
+//! - L : toggle the active block between an open path and a closed loop
+//! - Tab : cycle which block is active
+//! - Delete / Backspace : remove the active block
+//!
+//! The active block is drawn in yellow, others in cyan; the green dot marks each
+//! block's start (its resting position) and arrows show the travel direction.
 
 use sdl2::event::Event;
 use sdl2::keyboard::{Keycode, Mod};
@@ -29,7 +43,7 @@ use sdl2::pixels::Color;
 use sdl2::rect::Rect;
 use sdl2::render::{Texture, WindowCanvas};
 
-use rustgamex::level::{self, Edge, LevelData};
+use rustgamex::level::{self, Edge, LevelData, PathBlock};
 use rustgamex::player::{PLAYER_HEIGHT, PLAYER_WIDTH, Player};
 use rustgamex::tilemap::TileMap;
 use rustgamex::texture::load_png_texture;
@@ -62,6 +76,8 @@ const TILE_AREA_TOP: i32 = TOP_BAR_HEIGHT;
 // Top-bar button rects (all 44×28, y=4)
 const PREV_BTN: (i32, i32, u32, u32) = (8, BTN_Y, 44, BTN_H);
 const NEXT_BTN: (i32, i32, u32, u32) = (56, BTN_Y, 44, BTN_H);
+// Toggles path-block editing mode.
+const BLOCK_BTN: (i32, i32, u32, u32) = (170, BTN_Y, 52, BTN_H);
 // Resize buttons: left-click = grow, right-click = shrink
 const RESIZE_TOP_BTN: (i32, i32, u32, u32) = (580, BTN_Y, 36, BTN_H);
 const RESIZE_BOT_BTN: (i32, i32, u32, u32) = (620, BTN_Y, 36, BTN_H);
@@ -94,6 +110,16 @@ impl Tool {
             Tool::Tile(n) => format!("Tile {}", n),
         }
     }
+}
+
+/// What the cursor is currently dragging within the active path block.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Drag {
+    /// A single control point (only open-path endpoints are draggable this way).
+    Point(usize),
+    /// A whole edge `points[i] -> points[(i+1)%n]`, moved perpendicular to itself
+    /// so it carries both endpoints and keeps the path orthogonal.
+    Segment(usize),
 }
 
 /// A level being edited, paired with the file it came from.
@@ -161,7 +187,15 @@ fn main() -> Result<(), String> {
     let mut pan_down = false;
     let mut mouse = (0i32, 0i32);
 
-    let mut tilemap = TileMap::from_data(docs[current].level.tiles.clone());
+    // Path-block editing state.
+    let mut path_mode = false;
+    let mut active_block: Option<usize> = None;
+    // The point or edge currently being dragged within the active block.
+    let mut dragging: Option<Drag> = None;
+    // When set, the next left-click starts a fresh block instead of appending.
+    let mut start_new = false;
+
+    let mut tilemap = TileMap::from_level(&docs[current].level);
     let mut player = spawn_player(&docs[current].level);
     let mut dirty = false;
     set_title(&mut canvas, &docs, current, palette[selected]);
@@ -224,6 +258,42 @@ fn main() -> Result<(), String> {
                                 camera_y = 0.0;
                             }
                             Keycode::G => show_grid = !show_grid,
+                            Keycode::B => {
+                                path_mode = !path_mode;
+                                dragging = None;
+                                start_new = false;
+                                println!(
+                                    "Path-edit mode {}",
+                                    if path_mode { "ON" } else { "OFF" }
+                                );
+                            }
+                            Keycode::N if path_mode => {
+                                // Next click starts a new block.
+                                start_new = true;
+                                active_block = None;
+                            }
+                            Keycode::Tab if path_mode => {
+                                let n = docs[current].level.path_blocks.len();
+                                active_block = (n > 0).then(|| {
+                                    active_block.map_or(0, |b| (b + 1) % n)
+                                });
+                                dragging = None;
+                            }
+                            Keycode::L if path_mode => {
+                                if toggle_loop(&mut docs[current].level, active_block) {
+                                    docs[current].modified = true;
+                                    dirty = true;
+                                }
+                            }
+                            Keycode::Delete | Keycode::Backspace if path_mode => {
+                                if let Some(b) = active_block {
+                                    docs[current].level.path_blocks.remove(b);
+                                    active_block = None;
+                                    dragging = None;
+                                    docs[current].modified = true;
+                                    dirty = true;
+                                }
+                            }
                             _ => {}
                         }
                     }
@@ -243,7 +313,22 @@ fn main() -> Result<(), String> {
                     x, y, mousestate, ..
                 } => {
                     mouse = (x, y);
-                    if y >= TILE_AREA_TOP && y < HUD_TOP {
+                    if path_mode {
+                        if mousestate.left()
+                            && drag_path(
+                                &mut docs[current].level,
+                                active_block,
+                                dragging,
+                                x,
+                                y,
+                                camera_x,
+                                camera_y,
+                            )
+                        {
+                            docs[current].modified = true;
+                            dirty = true;
+                        }
+                    } else if y >= TILE_AREA_TOP && y < HUD_TOP {
                         if mousestate.left() {
                             if apply_tool(
                                 &mut docs[current].level,
@@ -272,6 +357,13 @@ fn main() -> Result<(), String> {
                     }
                 }
 
+                Event::MouseButtonUp {
+                    mouse_btn: MouseButton::Left,
+                    ..
+                } => {
+                    dragging = None;
+                }
+
                 Event::MouseButtonDown {
                     mouse_btn, x, y, ..
                 } => {
@@ -283,6 +375,10 @@ fn main() -> Result<(), String> {
                                     Some((current + docs.len() - 1) % docs.len());
                             } else if btn_hit(NEXT_BTN, x, y) {
                                 switch_to = Some((current + 1) % docs.len());
+                            } else if btn_hit(BLOCK_BTN, x, y) {
+                                path_mode = !path_mode;
+                                dragging = None;
+                                start_new = false;
                             } else if btn_hit(PLAY_BTN, x, y) {
                                 launch_game(&docs[current]);
                                 // Reset pan keys so held keys don't carry over
@@ -324,6 +420,32 @@ fn main() -> Result<(), String> {
                             selected = slot;
                             set_title(&mut canvas, &docs, current, palette[selected]);
                         }
+                    } else if path_mode {
+                        let changed = match mouse_btn {
+                            MouseButton::Left => path_left_click(
+                                &mut docs[current].level,
+                                &mut active_block,
+                                &mut dragging,
+                                &mut start_new,
+                                x,
+                                y,
+                                camera_x,
+                                camera_y,
+                            ),
+                            MouseButton::Right => path_right_click(
+                                &mut docs[current].level,
+                                &mut active_block,
+                                x,
+                                y,
+                                camera_x,
+                                camera_y,
+                            ),
+                            _ => false,
+                        };
+                        if changed {
+                            docs[current].modified = true;
+                            dirty = true;
+                        }
                     } else {
                         let tool = match mouse_btn {
                             MouseButton::Left => palette[selected],
@@ -353,12 +475,15 @@ fn main() -> Result<(), String> {
             pan_right = false;
             pan_up = false;
             pan_down = false;
+            active_block = None;
+            dragging = None;
+            start_new = false;
             dirty = true;
             set_title(&mut canvas, &docs, current, palette[selected]);
         }
 
         if dirty {
-            tilemap = TileMap::from_data(docs[current].level.tiles.clone());
+            tilemap = TileMap::from_level(&docs[current].level);
             player = spawn_player(&docs[current].level);
             dirty = false;
         }
@@ -391,6 +516,14 @@ fn main() -> Result<(), String> {
         if show_grid {
             draw_grid(&mut canvas, &tilemap, camera_xi, render_cam_y);
         }
+        draw_paths(
+            &mut canvas,
+            &docs[current].level,
+            active_block,
+            path_mode,
+            camera_xi,
+            render_cam_y,
+        );
         draw_hover(&mut canvas, &tilemap, mouse, camera_xi, render_cam_y);
         draw_hud(
             &mut canvas,
@@ -399,7 +532,7 @@ fn main() -> Result<(), String> {
             &palette,
             selected,
         );
-        draw_top_bar(&mut canvas, &docs, current);
+        draw_top_bar(&mut canvas, &docs, current, path_mode);
 
         canvas.present();
         time_provider.wait_for_next_frame();
@@ -457,6 +590,308 @@ fn apply_tool(
         }
     }
     true
+}
+
+/// Convert a screen position to the tile it sits over, or `None` if it is
+/// outside the tile-editing area. Mirrors the coordinate math in `apply_tool`.
+fn screen_to_tile(
+    screen_x: i32,
+    screen_y: i32,
+    camera_x: f32,
+    camera_y: f32,
+) -> Option<(i32, i32)> {
+    if !(TILE_AREA_TOP..HUD_TOP).contains(&screen_y) {
+        return None;
+    }
+    let world_x = screen_x as f32 + camera_x;
+    let world_y = (screen_y - TILE_AREA_TOP) as f32 + camera_y;
+    if world_x < 0.0 || world_y < 0.0 {
+        return None;
+    }
+    Some(((world_x / TILE_SIZE) as i32, (world_y / TILE_SIZE) as i32))
+}
+
+/// Snap `to` so it lies strictly horizontal or vertical from `from`, by keeping
+/// whichever axis moves the most and locking the other to `from`.
+fn snap_axis(from: (usize, usize), to: (usize, usize)) -> (usize, usize) {
+    let dx = (to.0 as i32 - from.0 as i32).abs();
+    let dy = (to.1 as i32 - from.1 as i32).abs();
+    if dx >= dy {
+        (to.0, from.1) // horizontal move
+    } else {
+        (from.0, to.1) // vertical move
+    }
+}
+
+/// True if `a` and `b` are strictly horizontal or vertical neighbours (share
+/// exactly one coordinate), matching the rule the level parser enforces.
+fn axis_aligned(a: (usize, usize), b: (usize, usize)) -> bool {
+    (a.0 == b.0) != (a.1 == b.1)
+}
+
+/// Find the (block index, point index) of a control point sitting on the given
+/// tile, if any.
+fn point_at_tile(level: &LevelData, tile: (usize, usize)) -> Option<(usize, usize)> {
+    for (b, block) in level.path_blocks.iter().enumerate() {
+        if let Some(p) = block.points.iter().position(|&pt| pt == tile) {
+            return Some((b, p));
+        }
+    }
+    None
+}
+
+/// True if `tile` lies strictly between the endpoints of the axis-aligned edge
+/// `a`-`b` (endpoints excluded - those are handled as control points).
+fn on_segment(a: (usize, usize), b: (usize, usize), tile: (usize, usize)) -> bool {
+    if a.1 == b.1 && tile.1 == a.1 {
+        return tile.0 > a.0.min(b.0) && tile.0 < a.0.max(b.0);
+    }
+    if a.0 == b.0 && tile.0 == a.0 {
+        return tile.1 > a.1.min(b.1) && tile.1 < a.1.max(b.1);
+    }
+    false
+}
+
+/// Find the (block index, segment index) of an edge passing through `tile`. The
+/// segment index `i` refers to the edge `points[i] -> points[(i+1) % n]`.
+fn segment_at_tile(level: &LevelData, tile: (usize, usize)) -> Option<(usize, usize)> {
+    for (b, block) in level.path_blocks.iter().enumerate() {
+        let n = block.points.len();
+        if n < 2 {
+            continue;
+        }
+        let segments = if block.closed { n } else { n - 1 };
+        for i in 0..segments {
+            if on_segment(block.points[i], block.points[(i + 1) % n], tile) {
+                return Some((b, i));
+            }
+        }
+    }
+    None
+}
+
+/// Whether every edge of the block (including the closing wrap when looped) is a
+/// valid strictly horizontal/vertical segment.
+fn block_is_valid(block: &PathBlock) -> bool {
+    let n = block.points.len();
+    if n < 2 {
+        return false;
+    }
+    let segments = if block.closed { n } else { n - 1 };
+    (0..segments).all(|i| axis_aligned(block.points[i], block.points[(i + 1) % n]))
+}
+
+/// Tile coordinate under the cursor, clamped to the level bounds. `None` if the
+/// cursor is outside the tile area entirely.
+fn cursor_tile(
+    level: &LevelData,
+    screen_x: i32,
+    screen_y: i32,
+    camera_x: f32,
+    camera_y: f32,
+) -> Option<(usize, usize)> {
+    let (tx, ty) = screen_to_tile(screen_x, screen_y, camera_x, camera_y)?;
+    if tx < 0 || ty < 0 || tx >= level.width() as i32 || ty >= level.height() as i32 {
+        return None;
+    }
+    Some((tx as usize, ty as usize))
+}
+
+/// Handle a left-click while in path mode: select/drag an existing point, or
+/// append a new one to (or start) the active block. Returns whether the level
+/// changed.
+#[allow(clippy::too_many_arguments)]
+fn path_left_click(
+    level: &mut LevelData,
+    active_block: &mut Option<usize>,
+    dragging: &mut Option<Drag>,
+    start_new: &mut bool,
+    screen_x: i32,
+    screen_y: i32,
+    camera_x: f32,
+    camera_y: f32,
+) -> bool {
+    let Some(tile) = cursor_tile(level, screen_x, screen_y, camera_x, camera_y) else {
+        return false;
+    };
+
+    // Clicking an existing point selects its block; an open path's endpoint can
+    // then be dragged.
+    if let Some((b, p)) = point_at_tile(level, tile) {
+        *active_block = Some(b);
+        let block = &level.path_blocks[b];
+        let is_endpoint = !block.closed && (p == 0 || p == block.points.len() - 1);
+        *dragging = is_endpoint.then_some(Drag::Point(p));
+        return false;
+    }
+
+    // Clicking on an edge (between two points) selects its block and starts
+    // dragging that whole edge.
+    if let Some((b, s)) = segment_at_tile(level, tile) {
+        *active_block = Some(b);
+        *dragging = Some(Drag::Segment(s));
+        return false;
+    }
+
+    // Start a new block when asked, or when there is none active yet.
+    if *start_new || active_block.is_none() {
+        level.path_blocks.push(PathBlock {
+            points: vec![tile],
+            closed: false,
+        });
+        *active_block = Some(level.path_blocks.len() - 1);
+        *start_new = false;
+        return true;
+    }
+
+    // Otherwise append a snapped point to the active (open) block.
+    let block = &mut level.path_blocks[active_block.unwrap()];
+    if block.closed {
+        return false; // press L to open the loop before extending it
+    }
+    let last = *block.points.last().unwrap();
+    let next = snap_axis(last, tile);
+    if next == last {
+        return false;
+    }
+    block.points.push(next);
+    true
+}
+
+/// Handle a right-click while in path mode: delete the control point under the
+/// cursor when doing so keeps the path valid. Returns whether the level changed.
+fn path_right_click(
+    level: &mut LevelData,
+    active_block: &mut Option<usize>,
+    screen_x: i32,
+    screen_y: i32,
+    camera_x: f32,
+    camera_y: f32,
+) -> bool {
+    let Some(tile) = cursor_tile(level, screen_x, screen_y, camera_x, camera_y) else {
+        return false;
+    };
+    let Some((b, p)) = point_at_tile(level, tile) else {
+        return false;
+    };
+
+    let block = &mut level.path_blocks[b];
+    let n = block.points.len();
+    // Removing a point is allowed when it is an open endpoint, or when its two
+    // neighbours stay axis-aligned once it is gone (a redundant point on a
+    // straight run). This keeps every path valid by construction.
+    let removable = if block.closed {
+        n > 2 && axis_aligned(block.points[(p + n - 1) % n], block.points[(p + 1) % n])
+    } else if p == 0 || p == n - 1 {
+        true
+    } else {
+        axis_aligned(block.points[p - 1], block.points[p + 1])
+    };
+    if !removable {
+        return false;
+    }
+
+    block.points.remove(p);
+    if block.points.len() < 2 {
+        level.path_blocks.remove(b);
+        *active_block = None;
+    } else {
+        *active_block = Some(b);
+    }
+    true
+}
+
+/// Move whatever is being dragged (a point or a whole edge) to follow the
+/// cursor, keeping the path orthogonal. Returns whether the level changed.
+fn drag_path(
+    level: &mut LevelData,
+    active_block: Option<usize>,
+    dragging: Option<Drag>,
+    screen_x: i32,
+    screen_y: i32,
+    camera_x: f32,
+    camera_y: f32,
+) -> bool {
+    let (Some(b), Some(drag)) = (active_block, dragging) else {
+        return false;
+    };
+    let Some(tile) = cursor_tile(level, screen_x, screen_y, camera_x, camera_y) else {
+        return false;
+    };
+    let block = &mut level.path_blocks[b];
+    match drag {
+        Drag::Point(p) => {
+            // Endpoints have a single neighbour; snap to keep that segment valid.
+            let neighbor = if p == 0 {
+                block.points.get(1).copied()
+            } else {
+                block.points.get(p - 1).copied()
+            };
+            let new_pt = neighbor.map_or(tile, |n| snap_axis(n, tile));
+            if block.points[p] == new_pt {
+                return false;
+            }
+            block.points[p] = new_pt;
+            true
+        }
+        Drag::Segment(s) => drag_segment(block, s, tile),
+    }
+}
+
+/// Slide edge `s` perpendicular to itself onto `tile`, carrying both its
+/// endpoints. The move is reverted if it would collapse an adjacent edge to zero
+/// length (which would break the path). Returns whether the block changed.
+fn drag_segment(block: &mut PathBlock, s: usize, tile: (usize, usize)) -> bool {
+    let n = block.points.len();
+    let j = (s + 1) % n;
+    let (a, c) = (block.points[s], block.points[j]);
+
+    let (new_a, new_c) = if a.1 == c.1 {
+        // Horizontal edge: move both endpoints' row to the cursor's row.
+        if tile.1 == a.1 {
+            return false;
+        }
+        ((a.0, tile.1), (c.0, tile.1))
+    } else if a.0 == c.0 {
+        // Vertical edge: move both endpoints' column to the cursor's column.
+        if tile.0 == a.0 {
+            return false;
+        }
+        ((tile.0, a.1), (tile.0, c.1))
+    } else {
+        return false;
+    };
+
+    block.points[s] = new_a;
+    block.points[j] = new_c;
+    if !block_is_valid(block) {
+        block.points[s] = a;
+        block.points[j] = c;
+        return false;
+    }
+    true
+}
+
+/// Toggle the active block between an open path and a closed loop. Closing
+/// requires at least three points and an axis-aligned wrap from the last point
+/// back to the first. Returns whether anything changed.
+fn toggle_loop(level: &mut LevelData, active_block: Option<usize>) -> bool {
+    let Some(b) = active_block else {
+        return false;
+    };
+    let block = &mut level.path_blocks[b];
+    if block.closed {
+        block.closed = false;
+        return true;
+    }
+    let first = block.points[0];
+    let last = *block.points.last().unwrap();
+    if block.points.len() >= 3 && axis_aligned(last, first) {
+        block.closed = true;
+        return true;
+    }
+    println!("Can't close this path: need 3+ points and an aligned closing segment");
+    false
 }
 
 /// Write the current level to a temporary directory and launch the game binary
@@ -583,6 +1018,101 @@ fn draw_hover(
     ));
 }
 
+/// Draw the path-block overlay: each block's control points joined by lines,
+/// with a green start marker and direction arrows. The active block is drawn in
+/// yellow, others in cyan; everything is dimmed when not in path-edit mode.
+fn draw_paths(
+    canvas: &mut WindowCanvas,
+    level: &LevelData,
+    active_block: Option<usize>,
+    path_mode: bool,
+    camera_x: i32,
+    camera_y: i32,
+) {
+    if level.path_blocks.is_empty() {
+        return;
+    }
+    let size = TILE_SIZE as i32;
+    // Keep the overlay inside the play area so lines never bleed into the bars.
+    let prev_clip = canvas.clip_rect();
+    canvas.set_clip_rect(Rect::new(
+        0,
+        TILE_AREA_TOP,
+        VIEW_WIDTH,
+        (HUD_TOP - TILE_AREA_TOP) as u32,
+    ));
+
+    let alpha = if path_mode { 235 } else { 110 };
+    let center = |pt: (usize, usize)| -> (i32, i32) {
+        (
+            pt.0 as i32 * size + size / 2 - camera_x,
+            pt.1 as i32 * size + size / 2 - camera_y,
+        )
+    };
+
+    for (b, block) in level.path_blocks.iter().enumerate() {
+        let is_active = path_mode && active_block == Some(b);
+        let line_color = if is_active {
+            Color::RGBA(255, 235, 90, alpha)
+        } else {
+            Color::RGBA(100, 200, 235, alpha)
+        };
+
+        // Segments between consecutive points (plus the closing wrap if looped).
+        let n = block.points.len();
+        let last_seg = if block.closed { n } else { n.saturating_sub(1) };
+        for i in 0..last_seg {
+            let a = center(block.points[i]);
+            let c = center(block.points[(i + 1) % n]);
+            canvas.set_draw_color(line_color);
+            draw_thick_line(canvas, a, c);
+            if path_mode {
+                draw_seg_arrow(canvas, a, c, line_color);
+            }
+        }
+
+        // Control points: the start (index 0, the resting position) is a larger
+        // green dot; the rest are smaller dots in the block's colour.
+        for (i, &pt) in block.points.iter().enumerate() {
+            let (px, py) = center(pt);
+            if i == 0 {
+                canvas.set_draw_color(Color::RGBA(90, 220, 120, alpha));
+                fill_circle(canvas, px, py, 6);
+            } else {
+                canvas.set_draw_color(line_color);
+                fill_circle(canvas, px, py, 4);
+            }
+        }
+    }
+
+    canvas.set_clip_rect(prev_clip);
+}
+
+/// Draw a 3px-wide line by stacking three 1px lines.
+fn draw_thick_line(canvas: &mut WindowCanvas, a: (i32, i32), b: (i32, i32)) {
+    let _ = canvas.draw_line(a, b);
+    let _ = canvas.draw_line((a.0 + 1, a.1), (b.0 + 1, b.1));
+    let _ = canvas.draw_line((a.0, a.1 + 1), (b.0, b.1 + 1));
+}
+
+/// Draw a small chevron at the midpoint of an axis-aligned segment, pointing
+/// from `a` toward `b` to show the block's travel direction.
+fn draw_seg_arrow(canvas: &mut WindowCanvas, a: (i32, i32), b: (i32, i32), color: Color) {
+    canvas.set_draw_color(color);
+    let mx = (a.0 + b.0) / 2;
+    let my = (a.1 + b.1) / 2;
+    let dx = (b.0 - a.0).signum();
+    let dy = (b.1 - a.1).signum();
+    let s = 5;
+    if dx != 0 {
+        let _ = canvas.draw_line((mx, my), (mx - dx * s, my - s));
+        let _ = canvas.draw_line((mx, my), (mx - dx * s, my + s));
+    } else if dy != 0 {
+        let _ = canvas.draw_line((mx, my), (mx - s, my - dy * s));
+        let _ = canvas.draw_line((mx, my), (mx + s, my - dy * s));
+    }
+}
+
 fn draw_hud(
     canvas: &mut WindowCanvas,
     tilemap_texture: &Texture,
@@ -645,7 +1175,7 @@ fn draw_hud(
 }
 
 /// Draw the top toolbar: Prev/Next level buttons and resize buttons.
-fn draw_top_bar(canvas: &mut WindowCanvas, docs: &[Document], current: usize) {
+fn draw_top_bar(canvas: &mut WindowCanvas, docs: &[Document], current: usize, path_mode: bool) {
     // Background
     canvas.set_draw_color(Color::RGB(30, 30, 40));
     let _ = canvas.fill_rect(Rect::new(0, 0, VIEW_WIDTH, TOP_BAR_HEIGHT as u32));
@@ -656,6 +1186,9 @@ fn draw_top_bar(canvas: &mut WindowCanvas, docs: &[Document], current: usize) {
     // --- Prev / Next buttons ---
     draw_nav_button(canvas, PREV_BTN, ArrowDir::Left);
     draw_nav_button(canvas, NEXT_BTN, ArrowDir::Right);
+
+    // --- Path-mode toggle button ---
+    draw_block_button(canvas, BLOCK_BTN, path_mode);
 
     // Level indicator dots between the nav buttons
     let n = docs.len();
@@ -778,6 +1311,45 @@ fn draw_play_button(canvas: &mut WindowCanvas, b: (i32, i32, u32, u32)) {
     }
 }
 
+/// Draw the path-edit toggle button: a little zig-zag path with dotted nodes,
+/// lit up yellow while path mode is active.
+fn draw_block_button(canvas: &mut WindowCanvas, b: (i32, i32, u32, u32), active: bool) {
+    let r = to_rect(b);
+    if active {
+        canvas.set_draw_color(Color::RGB(80, 75, 40));
+    } else {
+        canvas.set_draw_color(Color::RGB(50, 50, 65));
+    }
+    let _ = canvas.fill_rect(r);
+    canvas.set_draw_color(if active {
+        Color::RGB(255, 235, 90)
+    } else {
+        Color::RGB(90, 90, 110)
+    });
+    let _ = canvas.draw_rect(r);
+
+    // A small zig-zag path with node dots, matching the overlay's look.
+    let glyph = if active {
+        Color::RGB(255, 235, 90)
+    } else {
+        Color::RGB(160, 200, 230)
+    };
+    canvas.set_draw_color(glyph);
+    let cy = b.1 + b.3 as i32 / 2;
+    let nodes = [
+        (b.0 + 12, cy + 6),
+        (b.0 + 26, cy + 6),
+        (b.0 + 26, cy - 6),
+        (b.0 + 40, cy - 6),
+    ];
+    for w in nodes.windows(2) {
+        let _ = canvas.draw_line(w[0], w[1]);
+    }
+    for n in nodes {
+        fill_circle(canvas, n.0, n.1, 2);
+    }
+}
+
 /// Approximate a filled circle using horizontal lines.
 fn fill_circle(canvas: &mut WindowCanvas, cx: i32, cy: i32, r: i32) {
     for dy in -r..=r {
@@ -816,5 +1388,172 @@ fn print_controls() {
     println!("  Arrows / WASD: pan camera              Home        : scroll to start");
     println!("  Ctrl+Arrow  : grow canvas at that edge Ctrl+Shift+Arrow: shrink that edge");
     println!("  G           : toggle grid              Ctrl+S      : save level");
+    println!("  B           : toggle path-edit mode (or click the path toolbar button)");
+    println!("  Path mode   : left-click adds points / drags points & edges, right-click deletes");
+    println!("                N new block, L open/close loop, Tab cycle, Del remove block");
     println!("  Esc / Q     : quit");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 10x10 empty level with a spawn in the bottom-left.
+    fn empty_level() -> LevelData {
+        let mut rows = vec![".".repeat(10); 10];
+        rows[9].replace_range(0..1, "P");
+        LevelData::parse(&rows.join("\n")).unwrap()
+    }
+
+    /// Screen position at the centre of tile (tx, ty) with the camera at origin,
+    /// the inverse of `screen_to_tile`.
+    fn click_at(tx: i32, ty: i32) -> (i32, i32) {
+        let s = TILE_SIZE as i32;
+        (tx * s + s / 2, TILE_AREA_TOP + ty * s + s / 2)
+    }
+
+    #[test]
+    fn snap_axis_locks_to_dominant_axis() {
+        assert_eq!(snap_axis((2, 2), (6, 3)), (6, 2)); // horizontal wins
+        assert_eq!(snap_axis((2, 2), (3, 6)), (2, 6)); // vertical wins
+    }
+
+    #[test]
+    fn axis_aligned_detects_orthogonal_neighbours() {
+        assert!(axis_aligned((1, 1), (1, 5)));
+        assert!(axis_aligned((1, 1), (4, 1)));
+        assert!(!axis_aligned((1, 1), (2, 2)));
+        assert!(!axis_aligned((1, 1), (1, 1)));
+    }
+
+    #[test]
+    fn left_click_builds_an_axis_aligned_path() {
+        let mut level = empty_level();
+        let (mut active, mut drag, mut new) = (None, None, false);
+
+        let (x, y) = click_at(1, 1);
+        assert!(path_left_click(
+            &mut level, &mut active, &mut drag, &mut new, x, y, 0.0, 0.0
+        ));
+        // A diagonal target snaps to a horizontal segment from the last point.
+        let (x, y) = click_at(4, 3);
+        assert!(path_left_click(
+            &mut level, &mut active, &mut drag, &mut new, x, y, 0.0, 0.0
+        ));
+
+        assert_eq!(level.path_blocks[0].points, vec![(1, 1), (4, 1)]);
+        assert_eq!(active, Some(0));
+    }
+
+    #[test]
+    fn toggle_loop_requires_a_valid_closing_segment() {
+        let mut level = empty_level();
+        // Open L-shape: closing (4,4) -> (1,1) would be diagonal, so it can't close.
+        level.path_blocks.push(PathBlock {
+            points: vec![(1, 1), (4, 1), (4, 4)],
+            closed: false,
+        });
+        assert!(!toggle_loop(&mut level, Some(0)));
+        assert!(!level.path_blocks[0].closed);
+
+        // A rectangle closes cleanly.
+        level.path_blocks[0].points = vec![(1, 1), (4, 1), (4, 4), (1, 4)];
+        assert!(toggle_loop(&mut level, Some(0)));
+        assert!(level.path_blocks[0].closed);
+    }
+
+    #[test]
+    fn right_click_deletes_endpoint_and_drops_degenerate_block() {
+        let mut level = empty_level();
+        level.path_blocks.push(PathBlock {
+            points: vec![(1, 1), (4, 1)],
+            closed: false,
+        });
+        let mut active = Some(0);
+
+        let (x, y) = click_at(4, 1);
+        assert!(path_right_click(&mut level, &mut active, x, y, 0.0, 0.0));
+        // Down to one point, so the whole block is removed.
+        assert!(level.path_blocks.is_empty());
+        assert_eq!(active, None);
+    }
+
+    #[test]
+    fn right_click_keeps_corner_points_of_a_loop() {
+        let mut level = empty_level();
+        level.path_blocks.push(PathBlock {
+            points: vec![(1, 1), (4, 1), (4, 4), (1, 4)],
+            closed: true,
+        });
+        let mut active = Some(0);
+        // Deleting a corner would leave a diagonal join, so it is refused.
+        let (x, y) = click_at(4, 1);
+        assert!(!path_right_click(&mut level, &mut active, x, y, 0.0, 0.0));
+        assert_eq!(level.path_blocks[0].points.len(), 4);
+    }
+
+    #[test]
+    fn segment_at_tile_finds_edges_not_endpoints() {
+        let mut level = empty_level();
+        level.path_blocks.push(PathBlock {
+            points: vec![(1, 1), (5, 1)],
+            closed: false,
+        });
+        // A tile between the endpoints hits the edge...
+        assert_eq!(segment_at_tile(&level, (3, 1)), Some((0, 0)));
+        // ...but the endpoints themselves and off-line tiles do not.
+        assert_eq!(segment_at_tile(&level, (1, 1)), None);
+        assert_eq!(segment_at_tile(&level, (3, 2)), None);
+    }
+
+    #[test]
+    fn drag_segment_slides_a_horizontal_edge_keeping_neighbours_valid() {
+        // A square loop; dragging the top edge down carries both its corners.
+        let mut block = PathBlock {
+            points: vec![(1, 1), (4, 1), (4, 4), (1, 4)],
+            closed: true,
+        };
+        assert!(drag_segment(&mut block, 0, (99, 2)));
+        assert_eq!(block.points, vec![(1, 2), (4, 2), (4, 4), (1, 4)]);
+        assert!(block_is_valid(&block));
+    }
+
+    #[test]
+    fn drag_segment_slides_a_vertical_edge() {
+        let mut block = PathBlock {
+            points: vec![(1, 1), (1, 5)],
+            closed: false,
+        };
+        // Vertical edge: only the column moves; both endpoints follow.
+        assert!(drag_segment(&mut block, 0, (3, 99)));
+        assert_eq!(block.points, vec![(3, 1), (3, 5)]);
+    }
+
+    #[test]
+    fn drag_segment_reverts_when_it_would_collapse_a_neighbour() {
+        // Open L-shape: dragging the top edge down onto row 4 would make its
+        // right corner coincide with the next point, so the move is refused.
+        let mut block = PathBlock {
+            points: vec![(1, 1), (4, 1), (4, 4)],
+            closed: false,
+        };
+        assert!(!drag_segment(&mut block, 0, (99, 4)));
+        assert_eq!(block.points, vec![(1, 1), (4, 1), (4, 4)]);
+    }
+
+    #[test]
+    fn left_click_on_edge_starts_a_segment_drag() {
+        let mut level = empty_level();
+        level.path_blocks.push(PathBlock {
+            points: vec![(1, 1), (5, 1)],
+            closed: false,
+        });
+        let (mut active, mut drag, mut new) = (None, None, false);
+        let (x, y) = click_at(3, 1); // a tile on the edge
+        assert!(!path_left_click(
+            &mut level, &mut active, &mut drag, &mut new, x, y, 0.0, 0.0
+        ));
+        assert_eq!(active, Some(0));
+        assert_eq!(drag, Some(Drag::Segment(0)));
+    }
 }

@@ -1,5 +1,6 @@
 use crate::geometry::rect::Rect;
 use crate::geometry::vec2d::Vec2d;
+use crate::level::LevelData;
 use crate::tiles::{self, TILE_SIZE};
 use sdl2::render::{Texture, WindowCanvas};
 use std::collections::{HashMap, HashSet};
@@ -59,11 +60,53 @@ pub struct MovingPlatform {
     // Time left before a stopped platform is destroyed; `None` until it
     // collides with something
     pub destroy_timer: Option<f32>,
+    // When set, the platform endlessly follows this fixed path instead of being
+    // a one-shot platform that activates on touch and self-destructs. Path
+    // blocks are always `active`, never collide-stop, and have no destroy_timer.
+    pub path: Option<PathState>,
 }
 
 impl MovingPlatform {
     pub fn rect(&self) -> Rect {
         Rect::new(Vec2d::new(self.x, self.y), Vec2d::new(TILE_SIZE, TILE_SIZE))
+    }
+}
+
+/// The traversal state of a path-following block: the ordered control points
+/// (in pixel top-left coordinates) and where along them the block currently is.
+#[derive(Clone)]
+pub struct PathState {
+    /// Control points in path order, as pixel top-left positions.
+    points: Vec<Vec2d>,
+    /// Whether the path wraps from the last point back to the first.
+    closed: bool,
+    /// Index of the control point the block is currently moving toward.
+    target: usize,
+    /// For open paths, whether we are travelling toward higher indices. Unused
+    /// for closed loops, which always advance forward with wraparound.
+    forward: bool,
+}
+
+impl PathState {
+    /// Pick the next control point to head for once the current target is
+    /// reached. Closed paths wrap around; open paths reverse at each end.
+    fn advance(&mut self) {
+        let last = self.points.len() - 1;
+        if self.closed {
+            self.target = (self.target + 1) % self.points.len();
+        } else if self.forward {
+            if self.target == last {
+                self.forward = false;
+                self.target = last - 1;
+            } else {
+                self.target += 1;
+            }
+        } else if self.target == 0 {
+            self.forward = true;
+            self.target = 1;
+        } else {
+            self.target -= 1;
+        }
     }
 }
 
@@ -84,6 +127,8 @@ pub struct TileMap {
     disappearing_tiles: HashMap<(usize, usize), f32>, // (x, y) -> time remaining
     pub moving_platforms: Vec<MovingPlatform>,
     original_platforms: Vec<MovingPlatform>, // Store original platform positions for reset
+    path_blocks: Vec<MovingPlatform>,        // Blocks that endlessly follow a fixed path
+    original_path_blocks: Vec<MovingPlatform>, // Original path-block state for reset
     periodic_timer: f32,                     // Shared clock for periodic tiles (7/8)
     coin_timer: f32,                         // Shared clock for the coin shimmer animation
     triggered_death_tiles: HashSet<(usize, usize)>, // Death tiles the player has hit this life
@@ -129,6 +174,7 @@ impl TileMap {
                         original_tile_x: x as i32,
                         original_tile_y: y as i32,
                         destroy_timer: None,
+                        path: None,
                     });
                     tiles[y][x] = tiles::EMPTY;
                 }
@@ -144,11 +190,49 @@ impl TileMap {
             disappearing_tiles: HashMap::new(),
             moving_platforms: platforms.clone(),
             original_platforms: platforms,
+            path_blocks: Vec::new(),
+            original_path_blocks: Vec::new(),
             periodic_timer: 0.0,
             coin_timer: 0.0,
             triggered_death_tiles: HashSet::new(),
             coin_effects: Vec::new(),
         }
+    }
+
+    /// Build a tilemap from a parsed level: its tile grid plus any path-
+    /// following blocks declared in `block:` headers.
+    pub fn from_level(level: &LevelData) -> Self {
+        let mut map = Self::from_data(level.tiles.clone());
+        for def in &level.path_blocks {
+            if def.points.len() < 2 {
+                continue;
+            }
+            let points: Vec<Vec2d> = def
+                .points
+                .iter()
+                .map(|&(x, y)| Vec2d::new(x as f32 * TILE_SIZE, y as f32 * TILE_SIZE))
+                .collect();
+            let start = points[0];
+            map.path_blocks.push(MovingPlatform {
+                x: start.x,
+                y: start.y,
+                tile_type: tiles::SOLID,
+                active: true,
+                vel_x: 0.0,
+                vel_y: 0.0,
+                original_tile_x: def.points[0].0 as i32,
+                original_tile_y: def.points[0].1 as i32,
+                destroy_timer: None,
+                path: Some(PathState {
+                    points,
+                    closed: def.closed,
+                    target: 1,
+                    forward: true,
+                }),
+            });
+        }
+        map.original_path_blocks = map.path_blocks.clone();
+        map
     }
 
     pub fn reset(&mut self) {
@@ -160,6 +244,7 @@ impl TileMap {
         }
         self.disappearing_tiles.clear();
         self.moving_platforms = self.original_platforms.clone();
+        self.path_blocks = self.original_path_blocks.clone();
         self.periodic_timer = 0.0;
         self.coin_timer = 0.0;
         self.triggered_death_tiles.clear();
@@ -180,10 +265,18 @@ impl TileMap {
             .collect::<Vec<Tile>>()
     }
 
+    /// Every block the player physically interacts with: the one-shot moving
+    /// platforms and the path-following blocks. They share the same struct and
+    /// the player treats them identically (ride on top, get pushed/crushed).
+    pub fn platforms(&self) -> impl Iterator<Item = &MovingPlatform> {
+        self.moving_platforms.iter().chain(self.path_blocks.iter())
+    }
+
     pub fn update(&mut self, delta_time: f32) {
         self.update_periodic_tiles(delta_time);
         self.update_crumbling_tiles(delta_time);
         self.update_moving_platforms(delta_time);
+        self.update_path_blocks(delta_time);
         self.coin_timer = (self.coin_timer + delta_time) % COIN_ANIM_INTERVAL;
 
         // Advance coin-collection sparkles and drop them once both frames played
@@ -310,6 +403,56 @@ impl TileMap {
         // Remove in reverse to preserve indices
         for i in platforms_to_remove.iter().rev() {
             self.moving_platforms.remove(*i);
+        }
+    }
+
+    /// Advance each path-following block along its control points at a constant
+    /// speed, turning corners and reversing or looping at the ends. `vel_x`/
+    /// `vel_y` are set to the block's velocity on its current segment so the
+    /// player's carry/push logic (which reads them) works just as it does for
+    /// the one-shot moving platforms.
+    fn update_path_blocks(&mut self, delta_time: f32) {
+        for block in &mut self.path_blocks {
+            let Some(path) = block.path.as_mut() else {
+                continue;
+            };
+
+            let mut pos = Vec2d::new(block.x, block.y);
+            let mut remaining = PLATFORM_SPEED * delta_time;
+            // Direction of the last segment travelled this frame, used to expose
+            // the block's velocity for the player carry/push logic.
+            let mut dir = Vec2d::new(0.0, 0.0);
+
+            // A frame may cross several short segments; keep moving until the
+            // budget is spent. The bound guards against spinning forever should a
+            // degenerate (zero-length) segment ever slip through validation.
+            for _ in 0..path.points.len() {
+                if remaining <= 0.0 {
+                    break;
+                }
+                let target = path.points[path.target];
+                let to = target - pos;
+                let dist = (to.x * to.x + to.y * to.y).sqrt();
+
+                if dist <= remaining {
+                    pos = target;
+                    remaining -= dist;
+                    if dist > 0.0 {
+                        dir = Vec2d::new(to.x / dist, to.y / dist);
+                    }
+                    path.advance();
+                } else {
+                    dir = Vec2d::new(to.x / dist, to.y / dist);
+                    pos.x += dir.x * remaining;
+                    pos.y += dir.y * remaining;
+                    remaining = 0.0;
+                }
+            }
+
+            block.x = pos.x;
+            block.y = pos.y;
+            block.vel_x = dir.x * PLATFORM_SPEED;
+            block.vel_y = dir.y * PLATFORM_SPEED;
         }
     }
 
@@ -510,7 +653,7 @@ impl TileMap {
             }
         }
 
-        for platform in &self.moving_platforms {
+        for platform in self.platforms() {
             let dst_rect = sdl2::rect::Rect::new(
                 platform.x as i32 - camera_x,
                 platform.y as i32 - camera_y,
@@ -550,5 +693,62 @@ impl TileMap {
             );
             canvas.copy(texture, Some(src_rect), Some(dst_rect)).unwrap();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::level::LevelData;
+
+    /// Position of the single path block in a test map (it is the only platform).
+    fn block_pos(map: &TileMap) -> (f32, f32) {
+        let b = map.platforms().next().unwrap();
+        (b.x, b.y)
+    }
+
+    #[test]
+    fn open_path_block_moves_then_reverses() {
+        // Horizontal open path from tile (1,1) to (3,1): 80px (0.8s) one way.
+        let level = LevelData::parse("block: 1,1 3,1\n\nP.\n11").unwrap();
+        let mut map = TileMap::from_level(&level);
+        assert_eq!(block_pos(&map), (TILE_SIZE, TILE_SIZE), "starts on first point");
+
+        map.update(0.5); // 50px toward the far end
+        assert!((block_pos(&map).0 - (TILE_SIZE + 50.0)).abs() < 0.01);
+
+        // Reaches the far end at 0.8s, then reverses for 0.2s (20px back).
+        map.update(0.5);
+        assert!((block_pos(&map).0 - (3.0 * TILE_SIZE - 20.0)).abs() < 0.01);
+        assert!(
+            map.platforms().next().unwrap().vel_x < 0.0,
+            "velocity should point back toward the start after reversing"
+        );
+    }
+
+    #[test]
+    fn closed_loop_block_returns_to_start() {
+        // A square loop with 80px sides: perimeter 320px = 3.2s at 100px/s.
+        let level = LevelData::parse("block: 1,1 3,1 3,3 1,3 loop\n\nP.\n11").unwrap();
+        let mut map = TileMap::from_level(&level);
+        let start = block_pos(&map);
+
+        map.update(3.2);
+        let end = block_pos(&map);
+        assert!(
+            (end.0 - start.0).abs() < 0.01 && (end.1 - start.1).abs() < 0.01,
+            "loop should return to start, got {:?} vs {:?}",
+            end,
+            start
+        );
+    }
+
+    #[test]
+    fn path_block_resets_to_start() {
+        let level = LevelData::parse("block: 1,1 3,1\n\nP.\n11").unwrap();
+        let mut map = TileMap::from_level(&level);
+        map.update(0.5);
+        map.reset();
+        assert_eq!(block_pos(&map), (TILE_SIZE, TILE_SIZE));
     }
 }
