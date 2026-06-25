@@ -27,6 +27,12 @@
 //! for "hidden paths" (e.g. a wall-looking sprite over empty space). There may be
 //! any number of `deco:` lines.
 //!
+//! Decorations live on one of two layers. A `deco:` line is a *background*
+//! decoration, drawn behind the player, coins and moving platforms. A `fgdeco:`
+//! line (same `x,y sprite` syntax) is a *foreground* decoration, drawn in front
+//! of all of them so it can hide the player, coins and platforms passing behind
+//! it.
+//!
 //! Grid characters:
 //!
 //! | Char    | Tile                                  |
@@ -58,11 +64,22 @@ pub struct PathBlock {
     pub closed: bool,
 }
 
+/// Which side of the gameplay sprites a decoration is drawn on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DecoLayer {
+    /// Behind the player, coins and moving platforms. Declared with `deco:`.
+    Background,
+    /// In front of the player, coins and moving platforms, so it can hide them.
+    /// Declared with `fgdeco:`.
+    Foreground,
+}
+
 /// A render-only sprite placed somewhere in the level. Decorations carry no
 /// gameplay meaning at all - they are never consulted by collision, coins, or
 /// the exit - which is what lets them serve both as scenery and as "hidden
 /// paths" (a sprite drawn over otherwise-empty space, or omitted over solid
-/// ground). Defined by a `deco:` header line.
+/// ground). Defined by a `deco:` (background) or `fgdeco:` (foreground) header
+/// line.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Decoration {
     /// Position of the sprite's top-left corner, in pixel (world) coordinates.
@@ -72,6 +89,8 @@ pub struct Decoration {
     pub y: f32,
     /// 1-based index into the tilemap sprite sheet (see [`tiles::sheet_src_xy`]).
     pub sprite: u32,
+    /// Whether this sprite draws behind or in front of the gameplay sprites.
+    pub layer: DecoLayer,
 }
 
 /// Parsed level, independent of how it was stored on disk.
@@ -105,7 +124,12 @@ impl LevelData {
                     match key.trim() {
                         "name" => name = value.trim().to_string(),
                         "block" => path_blocks.push(parse_path_block(value.trim())?),
-                        "deco" => decorations.push(parse_decoration(value.trim())?),
+                        "deco" => {
+                            decorations.push(parse_decoration(value.trim(), DecoLayer::Background)?)
+                        }
+                        "fgdeco" => {
+                            decorations.push(parse_decoration(value.trim(), DecoLayer::Foreground)?)
+                        }
                         other => return Err(format!("unknown header key '{}'", other)),
                     }
                     continue;
@@ -211,8 +235,13 @@ impl LevelData {
             has_header = true;
         }
         for deco in &self.decorations {
+            let key = match deco.layer {
+                DecoLayer::Background => "deco",
+                DecoLayer::Foreground => "fgdeco",
+            };
             out.push_str(&format!(
-                "deco: {},{} {}\n",
+                "{}: {},{} {}\n",
+                key,
                 fmt_coord(deco.x),
                 fmt_coord(deco.y),
                 deco.sprite
@@ -399,10 +428,10 @@ fn parse_path_block(spec: &str) -> Result<PathBlock, String> {
     Ok(PathBlock { points, closed })
 }
 
-/// Parse the value of a `deco:` header into a [`Decoration`]. The value is an
-/// `x,y` pixel position followed by a 1-based sprite-sheet index, e.g.
-/// `40,80 27`.
-fn parse_decoration(spec: &str) -> Result<Decoration, String> {
+/// Parse the value of a `deco:`/`fgdeco:` header into a [`Decoration`] on the
+/// given layer. The value is an `x,y` pixel position followed by a 1-based
+/// sprite-sheet index, e.g. `40,80 27`.
+fn parse_decoration(spec: &str, layer: DecoLayer) -> Result<Decoration, String> {
     let mut tokens = spec.split_whitespace();
     let pos = tokens
         .next()
@@ -433,7 +462,7 @@ fn parse_decoration(spec: &str) -> Result<Decoration, String> {
         return Err("decoration sprite index must be 1 or greater".to_string());
     }
 
-    Ok(Decoration { x, y, sprite })
+    Ok(Decoration { x, y, sprite, layer })
 }
 
 /// Format a pixel coordinate for the level file, dropping the decimal point for
@@ -554,7 +583,7 @@ mod tests {
     #[test]
     fn to_text_round_trips_through_parse() {
         let original = LevelData::parse(
-            "name: Round Trip\nblock: 1,1 4,1 4,3 1,3 loop\nblock: 2,5 2,7\ndeco: 40,80 27\ndeco: 12.5,0 3\n\n.P1345678\n^>v<E.1.E",
+            "name: Round Trip\nblock: 1,1 4,1 4,3 1,3 loop\nblock: 2,5 2,7\ndeco: 40,80 27\ndeco: 12.5,0 3\nfgdeco: 80,40 9\n\n.P1345678\n^>v<E.1.E",
         )
         .unwrap();
         let reparsed = LevelData::parse(&original.to_text()).unwrap();
@@ -572,10 +601,19 @@ mod tests {
         assert_eq!(
             level.decorations,
             vec![
-                Decoration { x: 40.0, y: 80.0, sprite: 27 },
-                Decoration { x: 12.5, y: 0.0, sprite: 3 },
+                Decoration { x: 40.0, y: 80.0, sprite: 27, layer: DecoLayer::Background },
+                Decoration { x: 12.5, y: 0.0, sprite: 3, layer: DecoLayer::Background },
             ]
         );
+    }
+
+    #[test]
+    fn fgdeco_parses_onto_the_foreground_layer() {
+        let level = LevelData::parse("deco: 0,0 1\nfgdeco: 40,0 2\n\nP.\n11").unwrap();
+        assert_eq!(level.decorations[0].layer, DecoLayer::Background);
+        assert_eq!(level.decorations[1].layer, DecoLayer::Foreground);
+        // The foreground line round-trips back to `fgdeco:`.
+        assert!(level.to_text().contains("fgdeco: 40,0 2"));
     }
 
     #[test]
@@ -593,11 +631,17 @@ mod tests {
         // tile down and right.
         level.grow(Edge::Top);
         level.grow(Edge::Left);
-        assert_eq!(level.decorations[0], Decoration { x: 80.0, y: 80.0, sprite: 5 });
+        assert_eq!(
+            level.decorations[0],
+            Decoration { x: 80.0, y: 80.0, sprite: 5, layer: DecoLayer::Background }
+        );
         // Shrinking those edges again restores the original placement.
         level.shrink(Edge::Top);
         level.shrink(Edge::Left);
-        assert_eq!(level.decorations[0], Decoration { x: 40.0, y: 40.0, sprite: 5 });
+        assert_eq!(
+            level.decorations[0],
+            Decoration { x: 40.0, y: 40.0, sprite: 5, layer: DecoLayer::Background }
+        );
     }
 
     #[test]

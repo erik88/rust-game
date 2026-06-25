@@ -48,7 +48,8 @@ There are six tiles per row, so tile 7 is located at (0,40);
 
 ## Decorations
 - A purely decorative layer: any sprite from tilemap.png can be placed anywhere,
-  set by a `deco:` header line rather than a grid character (see "Levels" below).
+  set by a `deco:` (background) or `fgdeco:` (foreground) header line rather than
+  a grid character (see "Levels" below).
 - **Render-only** - decorations never affect gameplay (no collision, coins, or
   exit logic ever consults them). This makes them suitable both for scenery and
   for "hidden paths" (e.g. a solid-looking sprite drawn over empty space, or
@@ -59,8 +60,13 @@ There are six tiles per row, so tile 7 is located at (0,40);
 - The sprite is a 1-based index into the sprite sheet using the raw layout from
   the top of this file (index 1 = (0,0), six per row), so any sprite is reachable
   regardless of its gameplay meaning.
-- Render order: base tiles, then decorations, then moving tiles/blocks, then the
-  player.
+- **Two layers:**
+  - **Background** (`deco:`) draws behind the player, coins and moving
+    tiles/blocks.
+  - **Foreground** (`fgdeco:`) draws in front of all of them, so it can hide the
+    player, coins and platforms passing behind it.
+- Render order: base tiles, background decorations, moving tiles/blocks, the
+  player, then foreground decorations.
 
 # Levels
 
@@ -77,6 +83,7 @@ Path blocks are declared with one `block:` header line each, listing ordered
 `block: 5,11 12,11` (open) or `block: 7,3 10,3 10,6 7,6 loop` (closed). See the
 "Path blocks" section above.
 
-Decorations are declared with one `deco:` header line each, giving an `x,y`
-**pixel** position and a 1-based sprite-sheet index, e.g. `deco: 200,440 27`.
-See the "Decorations" section above.
+Decorations are declared with one `deco:` (background) or `fgdeco:` (foreground)
+header line each, giving an `x,y` **pixel** position and a 1-based sprite-sheet
+index, e.g. `deco: 200,440 27` or `fgdeco: 200,440 27`. See the "Decorations"
+section above.

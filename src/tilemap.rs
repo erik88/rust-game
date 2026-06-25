@@ -1,6 +1,6 @@
 use crate::geometry::rect::Rect;
 use crate::geometry::vec2d::Vec2d;
-use crate::level::{Decoration, LevelData};
+use crate::level::{Decoration, DecoLayer, LevelData};
 use crate::tiles::{self, TILE_SIZE};
 use sdl2::render::{Texture, WindowCanvas};
 use std::collections::{HashMap, HashSet};
@@ -657,22 +657,12 @@ impl TileMap {
             }
         }
 
-        // Decorations draw on top of the base tile grid but beneath the moving
-        // platforms (and the player, which the caller draws last). They are
-        // render-only, so they are positioned straight from their pixel
-        // coordinates without any grid snapping.
-        for deco in &self.decorations {
-            let dst_rect = sdl2::rect::Rect::new(
-                deco.x as i32 - camera_x,
-                deco.y as i32 - camera_y,
-                self.tile_size,
-                self.tile_size,
-            );
-            let sprite = tiles::sheet_src_xy(deco.sprite);
-            canvas
-                .copy(texture, Some(self.sprite_rect(sprite)), Some(dst_rect))
-                .unwrap();
-        }
+        // Background decorations draw on top of the base tile grid but beneath
+        // the moving platforms (and the player, which the caller draws last).
+        // They are render-only, so they are positioned straight from their pixel
+        // coordinates without any grid snapping. Foreground decorations are drawn
+        // later, by `render_foreground`, after the caller has drawn the player.
+        self.render_decorations(canvas, texture, camera_x, camera_y, DecoLayer::Background);
 
         for platform in self.platforms() {
             let dst_rect = sdl2::rect::Rect::new(
@@ -713,6 +703,43 @@ impl TileMap {
                 self.tile_size,
             );
             canvas.copy(texture, Some(src_rect), Some(dst_rect)).unwrap();
+        }
+    }
+
+    /// Draw the foreground decorations, which sit in front of the player, coins
+    /// and moving platforms (hiding whatever passes behind them). Call this after
+    /// the caller has drawn the player, since [`render`](Self::render) only draws
+    /// the background-layer decorations.
+    pub fn render_foreground(
+        &self,
+        canvas: &mut WindowCanvas,
+        texture: &Texture,
+        camera_x: i32,
+        camera_y: i32,
+    ) {
+        self.render_decorations(canvas, texture, camera_x, camera_y, DecoLayer::Foreground);
+    }
+
+    /// Draw every decoration on the given layer at its pixel position.
+    fn render_decorations(
+        &self,
+        canvas: &mut WindowCanvas,
+        texture: &Texture,
+        camera_x: i32,
+        camera_y: i32,
+        layer: DecoLayer,
+    ) {
+        for deco in self.decorations.iter().filter(|d| d.layer == layer) {
+            let dst_rect = sdl2::rect::Rect::new(
+                deco.x as i32 - camera_x,
+                deco.y as i32 - camera_y,
+                self.tile_size,
+                self.tile_size,
+            );
+            let sprite = tiles::sheet_src_xy(deco.sprite);
+            canvas
+                .copy(texture, Some(self.sprite_rect(sprite)), Some(dst_rect))
+                .unwrap();
         }
     }
 }

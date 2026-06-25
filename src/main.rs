@@ -127,6 +127,9 @@ fn main() -> Result<(), String> {
         // Render player
         player.render(&mut canvas, &character_texture, camera_x, camera_y);
 
+        // Foreground decorations draw over the player, coins and platforms
+        tilemap.render_foreground(&mut canvas, &tilemap_texture, camera_x, camera_y);
+
         // Present the rendered frame
         canvas.present();
 
