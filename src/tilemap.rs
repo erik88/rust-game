@@ -1,6 +1,6 @@
 use crate::geometry::rect::Rect;
 use crate::geometry::vec2d::Vec2d;
-use crate::level::LevelData;
+use crate::level::{Decoration, LevelData};
 use crate::tiles::{self, TILE_SIZE};
 use sdl2::render::{Texture, WindowCanvas};
 use std::collections::{HashMap, HashSet};
@@ -133,6 +133,7 @@ pub struct TileMap {
     coin_timer: f32,                         // Shared clock for the coin shimmer animation
     triggered_death_tiles: HashSet<(usize, usize)>, // Death tiles the player has hit this life
     coin_effects: Vec<CoinEffect>,           // Sparkles playing where coins were collected
+    decorations: Vec<Decoration>,            // Render-only sprites; never affect gameplay
 }
 
 pub struct Tile {
@@ -196,13 +197,16 @@ impl TileMap {
             coin_timer: 0.0,
             triggered_death_tiles: HashSet::new(),
             coin_effects: Vec::new(),
+            decorations: Vec::new(),
         }
     }
 
     /// Build a tilemap from a parsed level: its tile grid plus any path-
-    /// following blocks declared in `block:` headers.
+    /// following blocks declared in `block:` headers and decorative sprites
+    /// declared in `deco:` headers.
     pub fn from_level(level: &LevelData) -> Self {
         let mut map = Self::from_data(level.tiles.clone());
+        map.decorations = level.decorations.clone();
         for def in &level.path_blocks {
             if def.points.len() < 2 {
                 continue;
@@ -216,7 +220,7 @@ impl TileMap {
             map.path_blocks.push(MovingPlatform {
                 x: start.x,
                 y: start.y,
-                tile_type: tiles::SOLID,
+                tile_type: tiles::PATH_BLOCK,
                 active: true,
                 vel_x: 0.0,
                 vel_y: 0.0,
@@ -653,6 +657,23 @@ impl TileMap {
             }
         }
 
+        // Decorations draw on top of the base tile grid but beneath the moving
+        // platforms (and the player, which the caller draws last). They are
+        // render-only, so they are positioned straight from their pixel
+        // coordinates without any grid snapping.
+        for deco in &self.decorations {
+            let dst_rect = sdl2::rect::Rect::new(
+                deco.x as i32 - camera_x,
+                deco.y as i32 - camera_y,
+                self.tile_size,
+                self.tile_size,
+            );
+            let sprite = tiles::sheet_src_xy(deco.sprite);
+            canvas
+                .copy(texture, Some(self.sprite_rect(sprite)), Some(dst_rect))
+                .unwrap();
+        }
+
         for platform in self.platforms() {
             let dst_rect = sdl2::rect::Rect::new(
                 platform.x as i32 - camera_x,
@@ -750,5 +771,14 @@ mod tests {
         map.update(0.5);
         map.reset();
         assert_eq!(block_pos(&map), (TILE_SIZE, TILE_SIZE));
+    }
+
+    #[test]
+    fn decorations_are_carried_into_the_tilemap_without_touching_the_grid() {
+        let level = LevelData::parse("deco: 40,80 27\n\nP.\n11").unwrap();
+        let map = TileMap::from_level(&level);
+        assert_eq!(map.decorations, level.decorations);
+        // Decorations are render-only: the tile grid is unaffected.
+        assert_eq!(map.tiles, vec![vec![0, 0], vec![1, 1]]);
     }
 }

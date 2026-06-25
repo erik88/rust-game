@@ -30,9 +30,28 @@ pub const EXIT: u32 = 13;
 /// exit door opens. Never stored in a level file as a separate tile - it is
 /// placed with the `C` character.
 pub const COIN: u32 = 14;
+/// A path-following block. Render-only id: path blocks are declared with a
+/// `block:` header, never stored in the tile grid, so this id exists purely to
+/// select their sprite.
+pub const PATH_BLOCK: u32 = 15;
 /// Exit door, open phase. This is purely a render substitution for an [`EXIT`]
 /// tile once all coins are gone; it never appears in the tile grid itself.
 pub const EXIT_OPEN: u32 = 19;
+
+/// Number of 40px sprites per row in tilemap.png.
+pub const SHEET_COLUMNS: u32 = 6;
+
+/// Top-left pixel coordinate of the sprite at a 1-based sheet index, laid out
+/// left-to-right then top-to-bottom (index 1 = (0,0), index 7 = (0,40)). Unlike
+/// [`tile_src_xy`], which maps gameplay tile ids to their (possibly irregular)
+/// sprite positions, this addresses the sheet purely by position so decorations
+/// can reference *any* sprite regardless of gameplay meaning.
+pub fn sheet_src_xy(index: u32) -> (i32, i32) {
+    let i = index.saturating_sub(1);
+    let col = (i % SHEET_COLUMNS) as i32;
+    let row = (i / SHEET_COLUMNS) as i32;
+    (col * TILE_SIZE as i32, row * TILE_SIZE as i32)
+}
 
 /// Top-left pixel coordinate of a tile's graphic within tilemap.png. The sheet
 /// is 240x240 (six 40px tiles per row); these are the literal positions of each
@@ -52,6 +71,7 @@ pub fn tile_src_xy(tile_id: u32) -> (i32, i32) {
         MOVE_LEFT => (200, 40),
         EXIT => (0, 120),
         COIN => (40, 120),
+        PATH_BLOCK => (0, 80),
         EXIT_OPEN => (0, 160),
         _ => (0, 0),
     }

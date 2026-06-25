@@ -1122,6 +1122,7 @@ mod tests {
                 points: vec![(1, 5), (8, 5)],
                 closed: false,
             }],
+            decorations: Vec::new(),
         };
 
         let mut runner = TestRunner::new_with(

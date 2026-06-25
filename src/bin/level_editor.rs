@@ -5,11 +5,17 @@
 //! paint tiles onto the grid. Edits are kept in memory per level and are only
 //! written to disk when you save, so switching levels never loses work.
 //!
+//! The editor has three mutually-exclusive modes, switched with the grouped
+//! toolbar buttons (or the keys noted below): Normal (paint tiles), Path (edit
+//! path blocks) and Deco (place decorations). The bottom tool palette is only
+//! shown in Normal mode.
+//!
 //! Controls:
-//! - Left mouse   : apply the selected palette tool to the tile under the cursor
-//! - Right mouse  : erase the tile under the cursor
+//! - Click a mode button in the toolbar (or press B / X) to switch modes
+//! - Left mouse   : in Normal mode, apply the selected palette tool to the tile under the cursor
+//! - Right mouse  : in Normal mode, erase the tile under the cursor
 //! - (click+drag paints continuously)
-//! - Click the bottom palette bar to choose a tool
+//! - Click the bottom palette bar to choose a tool (Normal mode)
 //! - Click [◀] / [▶] buttons in the toolbar to switch levels
 //! - Click resize arrow buttons (top bar right side) to grow/shrink level edges
 //!   Left-click = grow, Right-click = shrink
@@ -23,18 +29,26 @@
 //! - Esc / Q      : quit
 //!
 //! Path-block editing (the moving blocks defined by `block:` headers):
-//! - B : toggle path-edit mode (or click the path button in the toolbar)
+//! - B : enter path mode (press again to return to Normal), or click the path button
+
 //! - Left-click an empty cell : append a control point to the active block, snapped to stay horizontal/vertical from the previous one
 //! - Left-click a control point : select its block, and drag it if it is an open path's endpoint
 //! - Left-click an edge (between two points) : drag the whole edge perpendicular to itself
 //! - Right-click a control point : delete it
 //! - N : start a new block (the next click places its first point)
-//! - L : toggle the active block between an open path and a closed loop
+//! - L : toggle the active block between an open path and a closed loop (or click
+//!   the Toggle-loop button in the path menu that appears in the bottom bar)
 //! - Tab : cycle which block is active
 //! - Delete / Backspace : remove the active block
 //!
 //! The active block is drawn in yellow, others in cyan; the green dot marks each
 //! block's start (its resting position) and arrows show the travel direction.
+//!
+//! Decoration editing (render-only sprites that do not affect gameplay):
+//! - X : enter decoration mode (press again to return to Normal), or click the picture button
+//! - The tilemap sheet appears as a picker overlay; click a cell to choose a sprite
+//! - Left-click (or drag) a cell : place the chosen decoration, snapped to the grid
+//! - Right-click (or drag) a cell : erase the decoration there
 
 use sdl2::event::Event;
 use sdl2::keyboard::{Keycode, Mod};
@@ -43,7 +57,7 @@ use sdl2::pixels::Color;
 use sdl2::rect::Rect;
 use sdl2::render::{Texture, WindowCanvas};
 
-use rustgamex::level::{self, Edge, LevelData, PathBlock};
+use rustgamex::level::{self, Decoration, Edge, LevelData, PathBlock};
 use rustgamex::player::{PLAYER_HEIGHT, PLAYER_WIDTH, Player};
 use rustgamex::tilemap::TileMap;
 use rustgamex::texture::load_png_texture;
@@ -70,14 +84,40 @@ const SLOT: i32 = 40;
 const SLOT_PAD: i32 = 6;
 const HUD_MARGIN_X: i32 = 8;
 
+// Path-mode action menu, drawn in the (otherwise empty) HUD bar while in path
+// mode. For now it holds a single "toggle loop" button.
+const PATH_MENU_BTN_H: i32 = 36;
+const PATH_LOOP_BTN: (i32, i32, u32, u32) = (
+    HUD_MARGIN_X,
+    HUD_TOP + (HUD_HEIGHT - PATH_MENU_BTN_H) / 2,
+    52,
+    PATH_MENU_BTN_H as u32,
+);
+
 // Tile area is between top bar and palette HUD
 const TILE_AREA_TOP: i32 = TOP_BAR_HEIGHT;
+
+// Decoration sprite picker: the whole 240x240 tilemap sheet (6x6 sprites at full
+// scale) drawn as an overlay in the top-right of the tile area while in
+// decoration mode. Clicking a cell selects that sprite.
+const PICKER_ROWS: i32 = 6;
+const PICKER_CELL: i32 = TILE_SIZE as i32;
+const PICKER_W: i32 = tiles::SHEET_COLUMNS as i32 * PICKER_CELL;
+const PICKER_H: i32 = PICKER_ROWS * PICKER_CELL;
+const PICKER_X: i32 = VIEW_WIDTH as i32 - PICKER_W;
+const PICKER_Y: i32 = TILE_AREA_TOP;
 
 // Top-bar button rects (all 44×28, y=4)
 const PREV_BTN: (i32, i32, u32, u32) = (8, BTN_Y, 44, BTN_H);
 const NEXT_BTN: (i32, i32, u32, u32) = (56, BTN_Y, 44, BTN_H);
-// Toggles path-block editing mode.
-const BLOCK_BTN: (i32, i32, u32, u32) = (170, BTN_Y, 52, BTN_H);
+// Mode-switch buttons, grouped left-to-right: place normal tiles, edit path
+// blocks, place decorations. Exactly one mode is active at a time.
+const MODE_BTN_W: u32 = 52;
+const MODE_BTN_X0: i32 = 116;
+const MODE_BTN_STEP: i32 = MODE_BTN_W as i32 + 6;
+const NORMAL_BTN: (i32, i32, u32, u32) = (MODE_BTN_X0, BTN_Y, MODE_BTN_W, BTN_H);
+const BLOCK_BTN: (i32, i32, u32, u32) = (MODE_BTN_X0 + MODE_BTN_STEP, BTN_Y, MODE_BTN_W, BTN_H);
+const DECO_BTN: (i32, i32, u32, u32) = (MODE_BTN_X0 + 2 * MODE_BTN_STEP, BTN_Y, MODE_BTN_W, BTN_H);
 // Resize buttons: left-click = grow, right-click = shrink
 const RESIZE_TOP_BTN: (i32, i32, u32, u32) = (580, BTN_Y, 36, BTN_H);
 const RESIZE_BOT_BTN: (i32, i32, u32, u32) = (620, BTN_Y, 36, BTN_H);
@@ -92,6 +132,28 @@ fn to_rect(b: (i32, i32, u32, u32)) -> Rect {
 
 fn btn_hit(b: (i32, i32, u32, u32), x: i32, y: i32) -> bool {
     x >= b.0 && x < b.0 + b.2 as i32 && y >= b.1 && y < b.1 + b.3 as i32
+}
+
+/// Which editing mode the editor is in. Exactly one is active at a time; the
+/// bottom tool palette is shown only in [`Mode::Normal`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// Paint normal tiles from the bottom palette.
+    Normal,
+    /// Edit path-block control points.
+    Path,
+    /// Place render-only decorations.
+    Deco,
+}
+
+impl Mode {
+    fn name(self) -> &'static str {
+        match self {
+            Mode::Normal => "Normal (tiles)",
+            Mode::Path => "Path blocks",
+            Mode::Deco => "Decorations",
+        }
+    }
 }
 
 /// A tool the user can paint with.
@@ -187,13 +249,19 @@ fn main() -> Result<(), String> {
     let mut pan_down = false;
     let mut mouse = (0i32, 0i32);
 
-    // Path-block editing state.
-    let mut path_mode = false;
+    // The active editing mode (normal tiles / path blocks / decorations).
+    let mut mode = Mode::Normal;
+
+    // Path-block editing state (used while in `Mode::Path`).
     let mut active_block: Option<usize> = None;
     // The point or edge currently being dragged within the active block.
     let mut dragging: Option<Drag> = None;
     // When set, the next left-click starts a fresh block instead of appending.
     let mut start_new = false;
+
+    // Decoration-placement state: which sprite-sheet index the next placement
+    // uses (while in `Mode::Deco`).
+    let mut deco_sprite: u32 = 1;
 
     let mut tilemap = TileMap::from_level(&docs[current].level);
     let mut player = spawn_player(&docs[current].level);
@@ -258,34 +326,39 @@ fn main() -> Result<(), String> {
                                 camera_y = 0.0;
                             }
                             Keycode::G => show_grid = !show_grid,
+                            // B and X toggle their mode on/off (returning to
+                            // Normal); the three are mutually exclusive.
                             Keycode::B => {
-                                path_mode = !path_mode;
+                                mode = if mode == Mode::Path { Mode::Normal } else { Mode::Path };
                                 dragging = None;
                                 start_new = false;
-                                println!(
-                                    "Path-edit mode {}",
-                                    if path_mode { "ON" } else { "OFF" }
-                                );
+                                println!("Mode: {}", mode.name());
                             }
-                            Keycode::N if path_mode => {
+                            Keycode::X => {
+                                mode = if mode == Mode::Deco { Mode::Normal } else { Mode::Deco };
+                                dragging = None;
+                                start_new = false;
+                                println!("Mode: {}", mode.name());
+                            }
+                            Keycode::N if mode == Mode::Path => {
                                 // Next click starts a new block.
                                 start_new = true;
                                 active_block = None;
                             }
-                            Keycode::Tab if path_mode => {
+                            Keycode::Tab if mode == Mode::Path => {
                                 let n = docs[current].level.path_blocks.len();
                                 active_block = (n > 0).then(|| {
                                     active_block.map_or(0, |b| (b + 1) % n)
                                 });
                                 dragging = None;
                             }
-                            Keycode::L if path_mode => {
+                            Keycode::L if mode == Mode::Path => {
                                 if toggle_loop(&mut docs[current].level, active_block) {
                                     docs[current].modified = true;
                                     dirty = true;
                                 }
                             }
-                            Keycode::Delete | Keycode::Backspace if path_mode => {
+                            Keycode::Delete | Keycode::Backspace if mode == Mode::Path => {
                                 if let Some(b) = active_block {
                                     docs[current].level.path_blocks.remove(b);
                                     active_block = None;
@@ -313,7 +386,7 @@ fn main() -> Result<(), String> {
                     x, y, mousestate, ..
                 } => {
                     mouse = (x, y);
-                    if path_mode {
+                    if mode == Mode::Path {
                         if mousestate.left()
                             && drag_path(
                                 &mut docs[current].level,
@@ -325,6 +398,22 @@ fn main() -> Result<(), String> {
                                 camera_y,
                             )
                         {
+                            docs[current].modified = true;
+                            dirty = true;
+                        }
+                    } else if mode == Mode::Deco {
+                        // Drag to paint or erase a run of decorations, but never
+                        // while the cursor is over the picker overlay.
+                        let changed = if in_deco_picker(x, y) {
+                            false
+                        } else if mousestate.left() {
+                            place_deco(&mut docs[current].level, deco_sprite, x, y, camera_x, camera_y)
+                        } else if mousestate.right() {
+                            erase_deco(&mut docs[current].level, x, y, camera_x, camera_y)
+                        } else {
+                            false
+                        };
+                        if changed {
                             docs[current].modified = true;
                             dirty = true;
                         }
@@ -375,8 +464,18 @@ fn main() -> Result<(), String> {
                                     Some((current + docs.len() - 1) % docs.len());
                             } else if btn_hit(NEXT_BTN, x, y) {
                                 switch_to = Some((current + 1) % docs.len());
+                            } else if btn_hit(NORMAL_BTN, x, y) {
+                                mode = Mode::Normal;
+                                dragging = None;
+                                start_new = false;
                             } else if btn_hit(BLOCK_BTN, x, y) {
-                                path_mode = !path_mode;
+                                // Toggle: a second click on the active mode's
+                                // button returns to Normal.
+                                mode = if mode == Mode::Path { Mode::Normal } else { Mode::Path };
+                                dragging = None;
+                                start_new = false;
+                            } else if btn_hit(DECO_BTN, x, y) {
+                                mode = if mode == Mode::Deco { Mode::Normal } else { Mode::Deco };
                                 dragging = None;
                                 start_new = false;
                             } else if btn_hit(PLAY_BTN, x, y) {
@@ -414,13 +513,62 @@ fn main() -> Result<(), String> {
                             }
                         }
                     } else if y >= HUD_TOP {
-                        if mouse_btn == MouseButton::Left
-                            && let Some(slot) = palette_slot_at(x, palette.len())
-                        {
-                            selected = slot;
-                            set_title(&mut canvas, &docs, current, palette[selected]);
+                        // The HUD bar holds the tool palette in Normal mode and the
+                        // path action menu in Path mode; Deco mode leaves it empty.
+                        match mode {
+                            Mode::Normal => {
+                                if mouse_btn == MouseButton::Left
+                                    && let Some(slot) = palette_slot_at(x, palette.len())
+                                {
+                                    selected = slot;
+                                    set_title(&mut canvas, &docs, current, palette[selected]);
+                                }
+                            }
+                            Mode::Path => {
+                                if mouse_btn == MouseButton::Left
+                                    && btn_hit(PATH_LOOP_BTN, x, y)
+                                    && toggle_loop(&mut docs[current].level, active_block)
+                                {
+                                    docs[current].modified = true;
+                                    dirty = true;
+                                }
+                            }
+                            Mode::Deco => {}
                         }
-                    } else if path_mode {
+                    } else if mode == Mode::Deco {
+                        // Clicking the sprite picker selects a sprite; clicking
+                        // the level places (left) or erases (right) a decoration.
+                        if in_deco_picker(x, y) {
+                            if mouse_btn == MouseButton::Left
+                                && let Some(s) = picker_sprite_at(x, y)
+                            {
+                                deco_sprite = s;
+                            }
+                        } else {
+                            let changed = match mouse_btn {
+                                MouseButton::Left => place_deco(
+                                    &mut docs[current].level,
+                                    deco_sprite,
+                                    x,
+                                    y,
+                                    camera_x,
+                                    camera_y,
+                                ),
+                                MouseButton::Right => erase_deco(
+                                    &mut docs[current].level,
+                                    x,
+                                    y,
+                                    camera_x,
+                                    camera_y,
+                                ),
+                                _ => false,
+                            };
+                            if changed {
+                                docs[current].modified = true;
+                                dirty = true;
+                            }
+                        }
+                    } else if mode == Mode::Path {
                         let changed = match mouse_btn {
                             MouseButton::Left => path_left_click(
                                 &mut docs[current].level,
@@ -520,19 +668,33 @@ fn main() -> Result<(), String> {
             &mut canvas,
             &docs[current].level,
             active_block,
-            path_mode,
+            mode == Mode::Path,
+            camera_xi,
+            render_cam_y,
+        );
+        draw_decorations(
+            &mut canvas,
+            &docs[current].level,
+            mode == Mode::Deco,
             camera_xi,
             render_cam_y,
         );
         draw_hover(&mut canvas, &tilemap, mouse, camera_xi, render_cam_y);
+        if mode == Mode::Deco {
+            draw_deco_picker(&mut canvas, &tilemap_texture, deco_sprite);
+        }
         draw_hud(
             &mut canvas,
             &tilemap_texture,
             &character_texture,
             &palette,
             selected,
+            mode,
         );
-        draw_top_bar(&mut canvas, &docs, current, path_mode);
+        if mode == Mode::Path {
+            draw_path_menu(&mut canvas, &docs[current].level, active_block);
+        }
+        draw_top_bar(&mut canvas, &docs, current, mode);
 
         canvas.present();
         time_provider.wait_for_next_frame();
@@ -590,6 +752,81 @@ fn apply_tool(
         }
     }
     true
+}
+
+/// Whether a screen position is over the decoration sprite-picker overlay.
+fn in_deco_picker(x: i32, y: i32) -> bool {
+    x >= PICKER_X && x < PICKER_X + PICKER_W && y >= PICKER_Y && y < PICKER_Y + PICKER_H
+}
+
+/// The 1-based sprite-sheet index for the picker cell under a screen position,
+/// or `None` if the position is outside the picker.
+fn picker_sprite_at(x: i32, y: i32) -> Option<u32> {
+    if !in_deco_picker(x, y) {
+        return None;
+    }
+    let col = (x - PICKER_X) / PICKER_CELL;
+    let row = (y - PICKER_Y) / PICKER_CELL;
+    Some((row * tiles::SHEET_COLUMNS as i32 + col + 1) as u32)
+}
+
+/// Index of the decoration snapped to the given tile cell, if any. Decorations
+/// placed through the editor are grid-aligned, so a cell holds at most one.
+fn deco_index_at(level: &LevelData, tile: (usize, usize)) -> Option<usize> {
+    level.decorations.iter().position(|d| {
+        (d.x / TILE_SIZE).round() as i64 == tile.0 as i64
+            && (d.y / TILE_SIZE).round() as i64 == tile.1 as i64
+    })
+}
+
+/// Place a decoration of `sprite` at the grid cell under a screen position,
+/// snapped to the grid. Replaces any decoration already in that cell. Returns
+/// whether the level changed.
+fn place_deco(
+    level: &mut LevelData,
+    sprite: u32,
+    screen_x: i32,
+    screen_y: i32,
+    camera_x: f32,
+    camera_y: f32,
+) -> bool {
+    let Some(tile) = cursor_tile(level, screen_x, screen_y, camera_x, camera_y) else {
+        return false;
+    };
+    if let Some(i) = deco_index_at(level, tile) {
+        if level.decorations[i].sprite == sprite {
+            return false;
+        }
+        level.decorations[i].sprite = sprite;
+        return true;
+    }
+    level.decorations.push(Decoration {
+        x: tile.0 as f32 * TILE_SIZE,
+        y: tile.1 as f32 * TILE_SIZE,
+        sprite,
+    });
+    true
+}
+
+/// Remove the decoration in the grid cell under a screen position, if any.
+/// Returns whether the level changed.
+fn erase_deco(
+    level: &mut LevelData,
+    screen_x: i32,
+    screen_y: i32,
+    camera_x: f32,
+    camera_y: f32,
+) -> bool {
+    let Some(tile) = cursor_tile(level, screen_x, screen_y, camera_x, camera_y) else {
+        return false;
+    };
+    match deco_index_at(level, tile) {
+        Some(i) => {
+            level.decorations.remove(i);
+            true
+        }
+        None => false,
+    }
 }
 
 /// Convert a screen position to the tile it sits over, or `None` if it is
@@ -1088,6 +1325,63 @@ fn draw_paths(
     canvas.set_clip_rect(prev_clip);
 }
 
+/// Mark every decoration with a corner-bracket outline so its render-only sprite
+/// is distinguishable from the real gameplay tiles in the editor. Brighter while
+/// decoration mode is active, dimmed otherwise (mirroring the path overlay).
+fn draw_decorations(
+    canvas: &mut WindowCanvas,
+    level: &LevelData,
+    deco_mode: bool,
+    camera_x: i32,
+    camera_y: i32,
+) {
+    if level.decorations.is_empty() {
+        return;
+    }
+    // Keep the overlay inside the play area so brackets never bleed into the bars.
+    let prev_clip = canvas.clip_rect();
+    canvas.set_clip_rect(Rect::new(
+        0,
+        TILE_AREA_TOP,
+        VIEW_WIDTH,
+        (HUD_TOP - TILE_AREA_TOP) as u32,
+    ));
+
+    let size = TILE_SIZE as i32;
+    let alpha = if deco_mode { 235 } else { 110 };
+    // Magenta reads distinctly from the path overlay (yellow/cyan) and the hover
+    // highlight (yellow).
+    canvas.set_draw_color(Color::RGBA(235, 110, 230, alpha));
+
+    for deco in &level.decorations {
+        let x = deco.x as i32 - camera_x;
+        let y = deco.y as i32 - camera_y;
+        draw_corner_brackets(canvas, x, y, size);
+    }
+
+    canvas.set_clip_rect(prev_clip);
+}
+
+/// Draw an L-shaped bracket at each corner of the `size`x`size` cell at (x, y),
+/// using the canvas's current draw colour. Reads as a "marked object" outline
+/// without looking like a full tile border.
+fn draw_corner_brackets(canvas: &mut WindowCanvas, x: i32, y: i32, size: i32) {
+    let b = (size / 4).max(4); // bracket arm length
+    let (l, t, r, bot) = (x, y, x + size - 1, y + size - 1);
+    // Top-left
+    let _ = canvas.draw_line((l, t), (l + b, t));
+    let _ = canvas.draw_line((l, t), (l, t + b));
+    // Top-right
+    let _ = canvas.draw_line((r, t), (r - b, t));
+    let _ = canvas.draw_line((r, t), (r, t + b));
+    // Bottom-left
+    let _ = canvas.draw_line((l, bot), (l + b, bot));
+    let _ = canvas.draw_line((l, bot), (l, bot - b));
+    // Bottom-right
+    let _ = canvas.draw_line((r, bot), (r - b, bot));
+    let _ = canvas.draw_line((r, bot), (r, bot - b));
+}
+
 /// Draw a 3px-wide line by stacking three 1px lines.
 fn draw_thick_line(canvas: &mut WindowCanvas, a: (i32, i32), b: (i32, i32)) {
     let _ = canvas.draw_line(a, b);
@@ -1113,17 +1407,137 @@ fn draw_seg_arrow(canvas: &mut WindowCanvas, a: (i32, i32), b: (i32, i32), color
     }
 }
 
+/// Draw the decoration sprite picker: the whole tilemap sheet at full scale with
+/// a grid and the selected cell highlighted. Shown only in decoration mode.
+fn draw_deco_picker(canvas: &mut WindowCanvas, tilemap_texture: &Texture, selected: u32) {
+    // Backdrop framing the sheet so it reads as a panel over the level.
+    let frame = Rect::new(
+        PICKER_X - 4,
+        PICKER_Y - 4,
+        PICKER_W as u32 + 8,
+        PICKER_H as u32 + 8,
+    );
+    canvas.set_draw_color(Color::RGB(20, 20, 28));
+    let _ = canvas.fill_rect(frame);
+    canvas.set_draw_color(Color::RGB(90, 90, 110));
+    let _ = canvas.draw_rect(frame);
+
+    // The sheet itself, drawn 1:1 (it is exactly PICKER_W x PICKER_H).
+    let dst = Rect::new(PICKER_X, PICKER_Y, PICKER_W as u32, PICKER_H as u32);
+    let _ = canvas.copy(tilemap_texture, None, Some(dst));
+
+    // Cell grid.
+    canvas.set_draw_color(Color::RGBA(255, 255, 255, 40));
+    for col in 0..=tiles::SHEET_COLUMNS as i32 {
+        let x = PICKER_X + col * PICKER_CELL;
+        let _ = canvas.draw_line((x, PICKER_Y), (x, PICKER_Y + PICKER_H));
+    }
+    for row in 0..=PICKER_ROWS {
+        let y = PICKER_Y + row * PICKER_CELL;
+        let _ = canvas.draw_line((PICKER_X, y), (PICKER_X + PICKER_W, y));
+    }
+
+    // Highlight the selected cell.
+    let idx = selected.saturating_sub(1) as i32;
+    let col = idx % tiles::SHEET_COLUMNS as i32;
+    let row = idx / tiles::SHEET_COLUMNS as i32;
+    if row < PICKER_ROWS {
+        canvas.set_draw_color(Color::RGB(255, 235, 90));
+        let cell = Rect::new(
+            PICKER_X + col * PICKER_CELL,
+            PICKER_Y + row * PICKER_CELL,
+            PICKER_CELL as u32,
+            PICKER_CELL as u32,
+        );
+        let _ = canvas.draw_rect(cell);
+        let _ = canvas.draw_rect(Rect::new(
+            cell.x() - 1,
+            cell.y() - 1,
+            PICKER_CELL as u32 + 2,
+            PICKER_CELL as u32 + 2,
+        ));
+    }
+}
+
+/// Draw the path-mode action menu in the HUD bar. For now it is a single button
+/// that toggles the active block between an open path and a closed loop. The
+/// glyph reflects the active block's current state - a full rectangle with corner
+/// nodes for a loop, an open "C" for an open path - and lights up while it is a
+/// loop. Dimmed when there is no active block to act on.
+fn draw_path_menu(canvas: &mut WindowCanvas, level: &LevelData, active_block: Option<usize>) {
+    let closed = active_block
+        .and_then(|b| level.path_blocks.get(b))
+        .map(|blk| blk.closed);
+    let lit = closed == Some(true);
+    let has_active = closed.is_some();
+
+    let b = PATH_LOOP_BTN;
+    let r = to_rect(b);
+    canvas.set_draw_color(if lit {
+        Color::RGB(80, 75, 40)
+    } else {
+        Color::RGB(45, 45, 58)
+    });
+    let _ = canvas.fill_rect(r);
+    canvas.set_draw_color(if lit {
+        Color::RGB(255, 235, 90)
+    } else if has_active {
+        Color::RGB(100, 200, 235)
+    } else {
+        Color::RGB(80, 80, 100)
+    });
+    let _ = canvas.draw_rect(r);
+
+    // Loop glyph: top, left and bottom edges of a small rectangle are always
+    // drawn; the right edge is only closed when the active block is a loop.
+    let glyph = if lit {
+        Color::RGB(255, 235, 90)
+    } else if has_active {
+        Color::RGB(160, 200, 230)
+    } else {
+        Color::RGB(110, 110, 130)
+    };
+    canvas.set_draw_color(glyph);
+    let cx = b.0 + b.2 as i32 / 2;
+    let cy = b.1 + b.3 as i32 / 2;
+    let (gw, gh) = (16, 12);
+    let (l, t, ri, bo) = (cx - gw / 2, cy - gh / 2, cx + gw / 2, cy + gh / 2);
+    let _ = canvas.draw_line((l, t), (ri, t));
+    let _ = canvas.draw_line((l, t), (l, bo));
+    let _ = canvas.draw_line((l, bo), (ri, bo));
+    if lit {
+        // Closed loop: complete the rectangle and mark the corners like the
+        // path overlay's control points.
+        let _ = canvas.draw_line((ri, t), (ri, bo));
+        for (px, py) in [(l, t), (ri, t), (ri, bo), (l, bo)] {
+            fill_circle(canvas, px, py, 2);
+        }
+    } else {
+        // Open path: leave the right side open, capping the two free ends.
+        fill_circle(canvas, ri, t, 2);
+        fill_circle(canvas, ri, bo, 2);
+    }
+}
+
 fn draw_hud(
     canvas: &mut WindowCanvas,
     tilemap_texture: &Texture,
     character_texture: &Texture,
     palette: &[Tool],
     selected: usize,
+    mode: Mode,
 ) {
     canvas.set_draw_color(Color::RGB(30, 30, 40));
     let _ = canvas.fill_rect(Rect::new(0, HUD_TOP, VIEW_WIDTH, HUD_HEIGHT as u32));
     canvas.set_draw_color(Color::RGB(80, 80, 100));
     let _ = canvas.draw_line((0, HUD_TOP), (VIEW_WIDTH as i32, HUD_TOP));
+
+    // The tool palette is only relevant when painting normal tiles; the other
+    // modes have their own selectors (the path overlay / the sprite picker), so
+    // the bar is left empty for them.
+    if mode != Mode::Normal {
+        return;
+    }
 
     let slot_y = HUD_TOP + (HUD_HEIGHT - SLOT) / 2;
     for (i, tool) in palette.iter().enumerate() {
@@ -1174,8 +1588,9 @@ fn draw_hud(
     }
 }
 
-/// Draw the top toolbar: Prev/Next level buttons and resize buttons.
-fn draw_top_bar(canvas: &mut WindowCanvas, docs: &[Document], current: usize, path_mode: bool) {
+/// Draw the top toolbar: Prev/Next level buttons, mode-switch buttons, and
+/// resize buttons.
+fn draw_top_bar(canvas: &mut WindowCanvas, docs: &[Document], current: usize, mode: Mode) {
     // Background
     canvas.set_draw_color(Color::RGB(30, 30, 40));
     let _ = canvas.fill_rect(Rect::new(0, 0, VIEW_WIDTH, TOP_BAR_HEIGHT as u32));
@@ -1187,8 +1602,10 @@ fn draw_top_bar(canvas: &mut WindowCanvas, docs: &[Document], current: usize, pa
     draw_nav_button(canvas, PREV_BTN, ArrowDir::Left);
     draw_nav_button(canvas, NEXT_BTN, ArrowDir::Right);
 
-    // --- Path-mode toggle button ---
-    draw_block_button(canvas, BLOCK_BTN, path_mode);
+    // --- Mode-switch buttons (exactly one active) ---
+    draw_normal_button(canvas, NORMAL_BTN, mode == Mode::Normal);
+    draw_block_button(canvas, BLOCK_BTN, mode == Mode::Path);
+    draw_deco_button(canvas, DECO_BTN, mode == Mode::Deco);
 
     // Level indicator dots between the nav buttons
     let n = docs.len();
@@ -1311,6 +1728,42 @@ fn draw_play_button(canvas: &mut WindowCanvas, b: (i32, i32, u32, u32)) {
     }
 }
 
+/// Draw the normal-mode button: a small brick/tile glyph, lit up yellow while
+/// normal (tile-painting) mode is active.
+fn draw_normal_button(canvas: &mut WindowCanvas, b: (i32, i32, u32, u32), active: bool) {
+    let r = to_rect(b);
+    if active {
+        canvas.set_draw_color(Color::RGB(80, 75, 40));
+    } else {
+        canvas.set_draw_color(Color::RGB(50, 50, 65));
+    }
+    let _ = canvas.fill_rect(r);
+    canvas.set_draw_color(if active {
+        Color::RGB(255, 235, 90)
+    } else {
+        Color::RGB(90, 90, 110)
+    });
+    let _ = canvas.draw_rect(r);
+
+    // A little brick wall: an outer block with a couple of mortar lines.
+    let glyph = if active {
+        Color::RGB(255, 235, 90)
+    } else {
+        Color::RGB(160, 200, 230)
+    };
+    canvas.set_draw_color(glyph);
+    let cx = b.0 + b.2 as i32 / 2;
+    let cy = b.1 + b.3 as i32 / 2;
+    let block = Rect::new(cx - 11, cy - 7, 22, 14);
+    let _ = canvas.draw_rect(block);
+    // Horizontal mortar line splitting the two courses.
+    let _ = canvas.draw_line((cx - 11, cy), (cx + 11, cy));
+    // Staggered vertical mortar lines (offset between courses, like real bricks).
+    let _ = canvas.draw_line((cx, cy - 7), (cx, cy));
+    let _ = canvas.draw_line((cx - 6, cy), (cx - 6, cy + 7));
+    let _ = canvas.draw_line((cx + 6, cy), (cx + 6, cy + 7));
+}
+
 /// Draw the path-edit toggle button: a little zig-zag path with dotted nodes,
 /// lit up yellow while path mode is active.
 fn draw_block_button(canvas: &mut WindowCanvas, b: (i32, i32, u32, u32), active: bool) {
@@ -1348,6 +1801,42 @@ fn draw_block_button(canvas: &mut WindowCanvas, b: (i32, i32, u32, u32), active:
     for n in nodes {
         fill_circle(canvas, n.0, n.1, 2);
     }
+}
+
+/// Draw the decoration-mode toggle button: a small "picture" glyph (a framed
+/// tile with a little mountain/sun), lit green while decoration mode is active.
+fn draw_deco_button(canvas: &mut WindowCanvas, b: (i32, i32, u32, u32), active: bool) {
+    let r = to_rect(b);
+    if active {
+        canvas.set_draw_color(Color::RGB(40, 70, 55));
+    } else {
+        canvas.set_draw_color(Color::RGB(50, 50, 65));
+    }
+    let _ = canvas.fill_rect(r);
+    canvas.set_draw_color(if active {
+        Color::RGB(120, 220, 150)
+    } else {
+        Color::RGB(90, 90, 110)
+    });
+    let _ = canvas.draw_rect(r);
+
+    // A little framed picture: a border, a sun, and a mountain.
+    let glyph = if active {
+        Color::RGB(150, 230, 175)
+    } else {
+        Color::RGB(160, 200, 230)
+    };
+    canvas.set_draw_color(glyph);
+    let cx = b.0 + b.2 as i32 / 2;
+    let cy = b.1 + b.3 as i32 / 2;
+    let frame = Rect::new(cx - 11, cy - 8, 22, 16);
+    let _ = canvas.draw_rect(frame);
+    // Sun in the upper-left.
+    fill_circle(canvas, cx - 5, cy - 3, 2);
+    // Mountain along the bottom.
+    let base = cy + 7;
+    let _ = canvas.draw_line((cx - 9, base), (cx - 1, base - 9));
+    let _ = canvas.draw_line((cx - 1, base - 9), (cx + 9, base));
 }
 
 /// Approximate a filled circle using horizontal lines.
@@ -1388,9 +1877,12 @@ fn print_controls() {
     println!("  Arrows / WASD: pan camera              Home        : scroll to start");
     println!("  Ctrl+Arrow  : grow canvas at that edge Ctrl+Shift+Arrow: shrink that edge");
     println!("  G           : toggle grid              Ctrl+S      : save level");
-    println!("  B           : toggle path-edit mode (or click the path toolbar button)");
+    println!("  Modes (toolbar buttons): Normal tiles | B path blocks | X decorations");
+    println!("  Normal mode : click palette bar to pick a tool, left-click paints, right-click erases");
     println!("  Path mode   : left-click adds points / drags points & edges, right-click deletes");
     println!("                N new block, L open/close loop, Tab cycle, Del remove block");
+    println!("                (bottom bar shows a Toggle-loop button)");
+    println!("  Deco mode   : click picker to choose a sprite, left-click places, right-click erases");
     println!("  Esc / Q     : quit");
 }
 

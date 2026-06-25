@@ -21,6 +21,7 @@ There are six tiles per row, so tile 7 is located at (0,40);
 | 12          | A moving tile. Goes left.                                    |
 | 13          | An exit tile (door), CLOSED. Not solid. Opens once all coins are collected; touching it while open completes the level. |
 | 14          | A coin. Not solid. Collected on touch. All coins must be collected before exit doors open. |
+| 15          | A path block. Render-only sprite for the moving blocks declared with `block:` headers; never stored in the tile grid. |
 | 19          | An exit tile (door), OPEN. Render-only sprite shown for tile 13 once all coins are collected; never stored in a level file. |
 
 ## Coins and the exit
@@ -36,7 +37,7 @@ There are six tiles per row, so tile 7 is located at (0,40);
   - Carry the player forward, the player is standing on top of them.
 
 ## Path blocks
-- A solid block (rendered with the solid tile sprite) that endlessly travels a
+- A solid block (rendered with its own sprite, tile id 15 at (0,80)) that endlessly travels a
   fixed path of control points, set by a `block:` header line rather than a grid
   character (see "Levels" below). They reuse the same carry/push physics as the
   moving tiles above: the player can ride on top and is pushed/crushed when the
@@ -44,6 +45,22 @@ There are six tiles per row, so tile 7 is located at (0,40);
 - Consecutive control points must be strictly horizontal or vertical neighbours.
 - A trailing `loop` makes the path a closed cycle; without it the block reverses
   direction at each end (an open, back-and-forth path).
+
+## Decorations
+- A purely decorative layer: any sprite from tilemap.png can be placed anywhere,
+  set by a `deco:` header line rather than a grid character (see "Levels" below).
+- **Render-only** - decorations never affect gameplay (no collision, coins, or
+  exit logic ever consults them). This makes them suitable both for scenery and
+  for "hidden paths" (e.g. a solid-looking sprite drawn over empty space, or
+  ground left visually bare over a solid tile).
+- Position is in **pixel (world) coordinates**, not tile coordinates, so
+  placement (and, later, size) is not locked to the grid. The level editor snaps
+  to the grid by default.
+- The sprite is a 1-based index into the sprite sheet using the raw layout from
+  the top of this file (index 1 = (0,0), six per row), so any sprite is reachable
+  regardless of its gameplay meaning.
+- Render order: base tiles, then decorations, then moving tiles/blocks, then the
+  player.
 
 # Levels
 
@@ -59,3 +76,7 @@ Path blocks are declared with one `block:` header line each, listing ordered
 `x,y` control points and an optional trailing `loop`, e.g.
 `block: 5,11 12,11` (open) or `block: 7,3 10,3 10,6 7,6 loop` (closed). See the
 "Path blocks" section above.
+
+Decorations are declared with one `deco:` header line each, giving an `x,y`
+**pixel** position and a 1-based sprite-sheet index, e.g. `deco: 200,440 27`.
+See the "Decorations" section above.
