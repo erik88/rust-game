@@ -205,8 +205,385 @@ struct Document {
     modified: bool,
 }
 
+/// Camera-panning keys currently held. Grouped so they can all be released in
+/// one place (e.g. after launching the game, which can swallow the key-up
+/// events that would otherwise clear them).
+#[derive(Default)]
+struct Pan {
+    left: bool,
+    right: bool,
+    up: bool,
+    down: bool,
+}
+
+impl Pan {
+    fn clear(&mut self) {
+        *self = Pan::default();
+    }
+}
+
+/// A discrete editor action that can be triggered from more than one input: a
+/// toolbar/menu button click and/or a keyboard shortcut. Both input paths map
+/// their event to a `UICommand` and run it through [`Editor::execute`], so each
+/// action's behaviour lives in exactly one place instead of being duplicated
+/// between the key and mouse handlers.
+#[derive(Clone, Copy)]
+enum UICommand {
+    /// Move to the previous / next level (wrapping).
+    PrevLevel,
+    NextLevel,
+    /// Switch to a specific mode (the F1/F2 keys and the Normal button).
+    SetMode(Mode),
+    /// Path button: toggle between Path mode and Normal.
+    ToggleBlockMode,
+    /// Deco button: cycle Normal -> background -> foreground -> Normal.
+    CycleDecoMode,
+    /// F3: enter deco mode, flipping the active layer on each press.
+    FlipDecoLayer,
+    /// Grow (or, when `shrink`, shrink) the canvas at one edge.
+    Resize { edge: Edge, shrink: bool },
+    /// Arm a fresh path block (the next level click places its first point).
+    NewBlock,
+    /// Toggle the active block between an open path and a closed loop.
+    ToggleLoop,
+    /// Remove the active path block.
+    DeleteBlock,
+    /// Cycle which path block is active.
+    CycleBlock,
+    /// Toggle the grid overlay.
+    ToggleGrid,
+    /// Scroll the camera back to the level's origin.
+    Home,
+    /// Save the current level to its file.
+    Save,
+    /// Launch the game on the current level.
+    Play,
+    /// Quit the editor.
+    Quit,
+}
+
+/// All loop-persistent editor state. Bundling it here lets [`Editor::execute`]
+/// run a [`UICommand`] no matter which input triggered it; the SDL canvas and
+/// textures stay outside, owned by `main`.
+struct Editor {
+    docs: Vec<Document>,
+    palette: Vec<Tool>,
+    current: usize,
+    camera_x: f32,
+    camera_y: f32,
+    selected: usize,
+    show_grid: bool,
+    pan: Pan,
+    mouse: (i32, i32),
+    /// The active editing mode (normal tiles / path blocks / decorations).
+    mode: Mode,
+    /// Path-block editing state (used while in `Mode::Path`).
+    active_block: Option<usize>,
+    /// The point or edge currently being dragged within the active block.
+    dragging: Option<Drag>,
+    /// When set, the next left-click starts a fresh block instead of appending.
+    start_new: bool,
+    /// Which sprite-sheet index the next decoration placement uses, and which
+    /// layer it lands on (while in `Mode::Deco`).
+    deco_sprite: u32,
+    deco_layer: DecoLayer,
+    /// Rendered view of the current level, rebuilt from it whenever `dirty`.
+    tilemap: TileMap,
+    player: Player,
+    dirty: bool,
+    /// A pending level switch, applied once per frame after event handling so
+    /// the index never changes mid-iteration.
+    switch_to: Option<usize>,
+    /// Set by [`UICommand::Quit`]; breaks the main loop after the frame.
+    quit: bool,
+    /// Set whenever the window title needs refreshing (level/tool/modified
+    /// state changed); `main` re-applies it once per frame.
+    retitle: bool,
+}
+
+impl Editor {
+    fn new(docs: Vec<Document>, palette: Vec<Tool>) -> Self {
+        let tilemap = TileMap::from_level(&docs[0].level);
+        let player = spawn_player(&docs[0].level);
+        Editor {
+            docs,
+            palette,
+            current: 0,
+            camera_x: 0.0,
+            camera_y: 0.0,
+            selected: 2,
+            show_grid: true,
+            pan: Pan::default(),
+            mouse: (0, 0),
+            mode: Mode::Normal,
+            active_block: None,
+            dragging: None,
+            start_new: false,
+            deco_sprite: 1,
+            deco_layer: DecoLayer::Background,
+            tilemap,
+            player,
+            dirty: false,
+            switch_to: None,
+            quit: false,
+            retitle: false,
+        }
+    }
+
+    /// Run a single [`UICommand`]. This is the one place each action's effect
+    /// is defined; the keyboard and mouse handlers only translate input into a
+    /// command and call here.
+    fn execute(&mut self, cmd: UICommand) {
+        match cmd {
+            UICommand::PrevLevel => self.switch_level(-1),
+            UICommand::NextLevel => self.switch_level(1),
+            UICommand::SetMode(mode) => self.set_mode(mode),
+            UICommand::ToggleBlockMode => {
+                // A second click on the path button returns to Normal.
+                let next = if self.mode == Mode::Path {
+                    Mode::Normal
+                } else {
+                    Mode::Path
+                };
+                self.set_mode(next);
+            }
+            UICommand::CycleDecoMode => {
+                // Background and foreground are two separate deco modes on one
+                // button: 1st click = background, 2nd = foreground, 3rd = Normal.
+                if self.mode != Mode::Deco {
+                    self.deco_layer = DecoLayer::Background;
+                    self.set_mode(Mode::Deco);
+                } else if self.deco_layer == DecoLayer::Background {
+                    self.deco_layer = DecoLayer::Foreground;
+                    self.set_mode(Mode::Deco);
+                } else {
+                    self.set_mode(Mode::Normal);
+                }
+                if self.mode == Mode::Deco {
+                    println!("Deco layer: {}", layer_name(self.deco_layer));
+                }
+            }
+            UICommand::FlipDecoLayer => {
+                self.deco_layer = if self.deco_layer == DecoLayer::Foreground {
+                    DecoLayer::Background
+                } else {
+                    DecoLayer::Foreground
+                };
+                self.set_mode(Mode::Deco);
+            }
+            UICommand::Resize { edge, shrink } => {
+                let changed = if shrink {
+                    self.docs[self.current].level.shrink(edge)
+                } else {
+                    self.docs[self.current].level.grow(edge);
+                    true
+                };
+                if changed {
+                    self.mark_changed();
+                }
+            }
+            UICommand::NewBlock => {
+                // Arm a fresh block; the next level click places its first point.
+                self.start_new = true;
+                self.active_block = None;
+                self.dragging = None;
+            }
+            UICommand::ToggleLoop => {
+                if toggle_loop(&mut self.docs[self.current].level, self.active_block) {
+                    self.mark_changed();
+                }
+            }
+            UICommand::DeleteBlock => {
+                if let Some(b) = self.active_block {
+                    self.docs[self.current].level.path_blocks.remove(b);
+                    self.active_block = None;
+                    self.dragging = None;
+                    self.mark_changed();
+                }
+            }
+            UICommand::CycleBlock => {
+                let n = self.docs[self.current].level.path_blocks.len();
+                self.active_block = (n > 0).then(|| self.active_block.map_or(0, |b| (b + 1) % n));
+                self.dragging = None;
+            }
+            UICommand::ToggleGrid => self.show_grid = !self.show_grid,
+            UICommand::Home => {
+                self.camera_x = 0.0;
+                self.camera_y = 0.0;
+            }
+            UICommand::Save => {
+                save(&mut self.docs[self.current]);
+                self.retitle = true;
+            }
+            UICommand::Play => {
+                launch_game(&self.docs[self.current]);
+                // Reset pan keys so any held during the game don't carry over.
+                self.pan.clear();
+            }
+            UICommand::Quit => self.quit = true,
+        }
+    }
+
+    /// Switch the active mode, clearing the per-mode transient state both the
+    /// key and button paths reset.
+    fn set_mode(&mut self, mode: Mode) {
+        self.mode = mode;
+        self.dragging = None;
+        self.start_new = false;
+        println!("Mode: {}", mode.name());
+    }
+
+    /// Queue a move by `delta` levels (negative = previous), wrapping around.
+    fn switch_level(&mut self, delta: isize) {
+        let n = self.docs.len();
+        let next = (self.current as isize + delta).rem_euclid(n as isize) as usize;
+        self.switch_to = Some(next);
+    }
+
+    /// Mark the current level edited: flag it for redraw and a title refresh.
+    fn mark_changed(&mut self) {
+        self.docs[self.current].modified = true;
+        self.dirty = true;
+        self.retitle = true;
+    }
+
+    /// Apply a pending level switch, resetting the per-level view state.
+    fn apply_switch(&mut self) {
+        if let Some(index) = self.switch_to.take() {
+            self.current = index;
+            self.camera_x = 0.0;
+            self.camera_y = 0.0;
+            self.pan.clear();
+            self.active_block = None;
+            self.dragging = None;
+            self.start_new = false;
+            self.dirty = true;
+            self.retitle = true;
+        }
+    }
+
+    /// Rebuild the rendered view from the level data after an edit.
+    fn rebuild_if_dirty(&mut self) {
+        if self.dirty {
+            self.tilemap = TileMap::from_level(&self.docs[self.current].level);
+            self.player = spawn_player(&self.docs[self.current].level);
+            self.dirty = false;
+        }
+    }
+
+    /// Advance the camera by the held pan keys and clamp it to the level.
+    fn update_camera(&mut self, delta_time: f32) {
+        let pan = PAN_SPEED * delta_time;
+        if self.pan.left {
+            self.camera_x -= pan;
+        }
+        if self.pan.right {
+            self.camera_x += pan;
+        }
+        if self.pan.up {
+            self.camera_y -= pan;
+        }
+        if self.pan.down {
+            self.camera_y += pan;
+        }
+
+        let tile_area_h = (HUD_TOP - TILE_AREA_TOP) as f32;
+        let level_width = self.tilemap.width as f32 * self.tilemap.tile_size as f32;
+        let level_height = self.tilemap.height as f32 * self.tilemap.tile_size as f32;
+        let max_camera_x = (level_width - VIEW_WIDTH as f32).max(0.0);
+        let max_camera_y = (level_height - tile_area_h).max(0.0);
+        self.camera_x = self.camera_x.clamp(0.0, max_camera_x);
+        self.camera_y = self.camera_y.clamp(0.0, max_camera_y);
+    }
+}
+
+/// Map a key press (with its modifiers) to the [`UICommand`] it triggers, if
+/// any. Returns `None` for keys handled directly in the loop (panning) or that
+/// are unbound, so the caller can fall through to those.
+fn key_command(key: Keycode, ctrl: bool, shift: bool, mode: Mode) -> Option<UICommand> {
+    // Ctrl+Arrow resizes the canvas (Ctrl+Shift+Arrow shrinks instead of grows).
+    let resize_edge = match key {
+        Keycode::Up if ctrl => Some(Edge::Top),
+        Keycode::Down if ctrl => Some(Edge::Bottom),
+        Keycode::Left if ctrl => Some(Edge::Left),
+        Keycode::Right if ctrl => Some(Edge::Right),
+        _ => None,
+    };
+    if let Some(edge) = resize_edge {
+        return Some(UICommand::Resize { edge, shrink: shift });
+    }
+
+    Some(match key {
+        Keycode::S if ctrl => UICommand::Save,
+        Keycode::Escape | Keycode::Q => UICommand::Quit,
+        Keycode::Comma | Keycode::PageUp => UICommand::PrevLevel,
+        Keycode::Period | Keycode::PageDown => UICommand::NextLevel,
+        Keycode::Home => UICommand::Home,
+        Keycode::G => UICommand::ToggleGrid,
+        Keycode::F1 => UICommand::SetMode(Mode::Normal),
+        Keycode::F2 => UICommand::SetMode(Mode::Path),
+        Keycode::F3 => UICommand::FlipDecoLayer,
+        Keycode::N if mode == Mode::Path => UICommand::NewBlock,
+        Keycode::Tab if mode == Mode::Path => UICommand::CycleBlock,
+        Keycode::L if mode == Mode::Path => UICommand::ToggleLoop,
+        Keycode::Delete | Keycode::Backspace if mode == Mode::Path => UICommand::DeleteBlock,
+        _ => return None,
+    })
+}
+
+/// Map a mouse-button press in the top toolbar to the [`UICommand`] it
+/// triggers, if it hit a button. Left-click on a resize button grows, right
+/// shrinks; the other toolbar buttons only respond to the left button.
+fn topbar_command(btn: MouseButton, x: i32, y: i32) -> Option<UICommand> {
+    if btn == MouseButton::Left {
+        if btn_hit(PREV_BTN, x, y) {
+            return Some(UICommand::PrevLevel);
+        } else if btn_hit(NEXT_BTN, x, y) {
+            return Some(UICommand::NextLevel);
+        } else if btn_hit(NORMAL_BTN, x, y) {
+            return Some(UICommand::SetMode(Mode::Normal));
+        } else if btn_hit(BLOCK_BTN, x, y) {
+            return Some(UICommand::ToggleBlockMode);
+        } else if btn_hit(DECO_BTN, x, y) {
+            return Some(UICommand::CycleDecoMode);
+        } else if btn_hit(PLAY_BTN, x, y) {
+            return Some(UICommand::Play);
+        }
+    }
+    // Resize buttons respond to either button: left grows, right shrinks.
+    let edge = if btn_hit(RESIZE_TOP_BTN, x, y) {
+        Some(Edge::Top)
+    } else if btn_hit(RESIZE_BOT_BTN, x, y) {
+        Some(Edge::Bottom)
+    } else if btn_hit(RESIZE_LEFT_BTN, x, y) {
+        Some(Edge::Left)
+    } else if btn_hit(RESIZE_RIGHT_BTN, x, y) {
+        Some(Edge::Right)
+    } else {
+        None
+    };
+    edge.map(|edge| UICommand::Resize {
+        edge,
+        shrink: btn == MouseButton::Right,
+    })
+}
+
+/// Map a left-click in the path-mode HUD menu to the [`UICommand`] it triggers.
+fn path_menu_command(btn: MouseButton, x: i32, y: i32) -> Option<UICommand> {
+    if btn != MouseButton::Left {
+        return None;
+    }
+    if btn_hit(PATH_NEW_BTN, x, y) {
+        Some(UICommand::NewBlock)
+    } else if btn_hit(PATH_LOOP_BTN, x, y) {
+        Some(UICommand::ToggleLoop)
+    } else {
+        None
+    }
+}
+
 fn main() -> Result<(), String> {
-    let mut docs: Vec<Document> = level::load_dir_entries("levels")?
+    let docs: Vec<Document> = level::load_dir_entries("levels")?
         .into_iter()
         .map(|(path, level)| Document {
             path,
@@ -252,45 +629,20 @@ fn main() -> Result<(), String> {
     let mut event_pump = sdl_context.event_pump()?;
     let mut time_provider = RealTime::new();
 
-    let mut current = 0;
-    let mut camera_x = 0.0f32;
-    let mut camera_y = 0.0f32;
-    let mut selected = 2;
-    let mut show_grid = true;
-    let mut pan_left = false;
-    let mut pan_right = false;
-    let mut pan_up = false;
-    let mut pan_down = false;
-    let mut mouse = (0i32, 0i32);
-
-    // The active editing mode (normal tiles / path blocks / decorations).
-    let mut mode = Mode::Normal;
-
-    // Path-block editing state (used while in `Mode::Path`).
-    let mut active_block: Option<usize> = None;
-    // The point or edge currently being dragged within the active block.
-    let mut dragging: Option<Drag> = None;
-    // When set, the next left-click starts a fresh block instead of appending.
-    let mut start_new = false;
-
-    // Decoration-placement state: which sprite-sheet index the next placement
-    // uses, and which layer it lands on (while in `Mode::Deco`).
-    let mut deco_sprite: u32 = 1;
-    let mut deco_layer = DecoLayer::Background;
-
-    let mut tilemap = TileMap::from_level(&docs[current].level);
-    let mut player = spawn_player(&docs[current].level);
-    let mut dirty = false;
-    set_title(&mut canvas, &docs, current, palette[selected]);
+    let mut editor = Editor::new(docs, palette);
+    set_title(
+        &mut canvas,
+        &editor.docs,
+        editor.current,
+        editor.palette[editor.selected],
+    );
 
     'running: loop {
         let delta_time = time_provider.delta_time();
-        let mut switch_to = None;
-        let was_modified = docs[current].modified;
 
         for event in event_pump.poll_iter() {
             match event {
-                Event::Quit { .. } => break 'running,
+                Event::Quit { .. } => editor.quit = true,
 
                 Event::KeyDown {
                     keycode: Some(key),
@@ -299,95 +651,15 @@ fn main() -> Result<(), String> {
                 } => {
                     let ctrl = keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD);
                     let shift = keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD);
-                    let resize_edge = match key {
-                        Keycode::Up if ctrl => Some(Edge::Top),
-                        Keycode::Down if ctrl => Some(Edge::Bottom),
-                        Keycode::Left if ctrl => Some(Edge::Left),
-                        Keycode::Right if ctrl => Some(Edge::Right),
-                        _ => None,
-                    };
-
-                    if let Some(edge) = resize_edge {
-                        let changed = if shift {
-                            docs[current].level.shrink(edge)
-                        } else {
-                            docs[current].level.grow(edge);
-                            true
-                        };
-                        if changed {
-                            docs[current].modified = true;
-                            dirty = true;
-                            set_title(&mut canvas, &docs, current, palette[selected]);
-                        }
+                    if let Some(cmd) = key_command(key, ctrl, shift, editor.mode) {
+                        editor.execute(cmd);
                     } else {
+                        // Keys that aren't commands drive camera panning.
                         match key {
-                            Keycode::S if ctrl => {
-                                save(&mut docs[current]);
-                                set_title(&mut canvas, &docs, current, palette[selected]);
-                            }
-                            Keycode::Escape | Keycode::Q => break 'running,
-                            Keycode::Left | Keycode::A => pan_left = true,
-                            Keycode::Right | Keycode::D => pan_right = true,
-                            Keycode::Up | Keycode::W => pan_up = true,
-                            Keycode::Down | Keycode::S => pan_down = true,
-                            Keycode::Comma | Keycode::PageUp => {
-                                switch_to = Some((current + docs.len() - 1) % docs.len());
-                            }
-                            Keycode::Period | Keycode::PageDown => {
-                                switch_to = Some((current + 1) % docs.len());
-                            }
-                            Keycode::Home => {
-                                camera_x = 0.0;
-                                camera_y = 0.0;
-                            }
-                            Keycode::G => show_grid = !show_grid,
-                            Keycode::F1 => {
-                                mode = Mode::Normal;
-                                dragging = None;
-                                start_new = false;
-                                println!("Mode: {}", mode.name());
-                            },
-                            Keycode::F2 => {
-                                mode = Mode::Path;
-                                dragging = None;
-                                start_new = false;
-                                println!("Mode: {}", mode.name());
-                            }
-                            Keycode::F3 => {
-                                mode = Mode::Deco;
-                                deco_layer = if deco_layer == DecoLayer::Foreground { DecoLayer::Background } else { DecoLayer::Foreground };
-
-                                dragging = None;
-                                start_new = false;
-                                println!("Mode: {}", mode.name());
-                            }
-                            Keycode::N if mode == Mode::Path => {
-                                // Next click starts a new block.
-                                start_new = true;
-                                active_block = None;
-                            }
-                            Keycode::Tab if mode == Mode::Path => {
-                                let n = docs[current].level.path_blocks.len();
-                                active_block = (n > 0).then(|| {
-                                    active_block.map_or(0, |b| (b + 1) % n)
-                                });
-                                dragging = None;
-                            }
-                            Keycode::L if mode == Mode::Path => {
-                                if toggle_loop(&mut docs[current].level, active_block) {
-                                    docs[current].modified = true;
-                                    dirty = true;
-                                }
-                            }
-                            Keycode::Delete | Keycode::Backspace if mode == Mode::Path => {
-                                if let Some(b) = active_block {
-                                    docs[current].level.path_blocks.remove(b);
-                                    active_block = None;
-                                    dragging = None;
-                                    docs[current].modified = true;
-                                    dirty = true;
-                                }
-                            }
+                            Keycode::Left | Keycode::A => editor.pan.left = true,
+                            Keycode::Right | Keycode::D => editor.pan.right = true,
+                            Keycode::Up | Keycode::W => editor.pan.up = true,
+                            Keycode::Down | Keycode::S => editor.pan.down = true,
                             _ => {}
                         }
                     }
@@ -396,81 +668,84 @@ fn main() -> Result<(), String> {
                 Event::KeyUp {
                     keycode: Some(key), ..
                 } => match key {
-                    Keycode::Left | Keycode::A => pan_left = false,
-                    Keycode::Right | Keycode::D => pan_right = false,
-                    Keycode::Up | Keycode::W => pan_up = false,
-                    Keycode::Down | Keycode::S => pan_down = false,
+                    Keycode::Left | Keycode::A => editor.pan.left = false,
+                    Keycode::Right | Keycode::D => editor.pan.right = false,
+                    Keycode::Up | Keycode::W => editor.pan.up = false,
+                    Keycode::Down | Keycode::S => editor.pan.down = false,
                     _ => {}
                 },
 
                 Event::MouseMotion {
                     x, y, mousestate, ..
                 } => {
-                    mouse = (x, y);
-                    if mode == Mode::Path {
+                    editor.mouse = (x, y);
+                    if editor.mode == Mode::Path {
                         if mousestate.left()
                             && drag_path(
-                                &mut docs[current].level,
-                                active_block,
-                                dragging,
+                                &mut editor.docs[editor.current].level,
+                                editor.active_block,
+                                editor.dragging,
                                 x,
                                 y,
-                                camera_x,
-                                camera_y,
+                                editor.camera_x,
+                                editor.camera_y,
                             )
                         {
-                            docs[current].modified = true;
-                            dirty = true;
+                            editor.mark_changed();
                         }
-                    } else if mode == Mode::Deco {
+                    } else if editor.mode == Mode::Deco {
                         // Drag to paint or erase a run of decorations, but never
                         // while the cursor is over the picker overlay.
                         let changed = if in_deco_picker(x, y) {
                             false
                         } else if mousestate.left() {
                             place_deco(
-                                &mut docs[current].level,
-                                deco_sprite,
-                                deco_layer,
+                                &mut editor.docs[editor.current].level,
+                                editor.deco_sprite,
+                                editor.deco_layer,
                                 x,
                                 y,
-                                camera_x,
-                                camera_y,
+                                editor.camera_x,
+                                editor.camera_y,
                             )
                         } else if mousestate.right() {
-                            erase_deco(&mut docs[current].level, deco_layer, x, y, camera_x, camera_y)
+                            erase_deco(
+                                &mut editor.docs[editor.current].level,
+                                editor.deco_layer,
+                                x,
+                                y,
+                                editor.camera_x,
+                                editor.camera_y,
+                            )
                         } else {
                             false
                         };
                         if changed {
-                            docs[current].modified = true;
-                            dirty = true;
+                            editor.mark_changed();
                         }
                     } else if y >= TILE_AREA_TOP && y < HUD_TOP {
                         if mousestate.left() {
                             if apply_tool(
-                                &mut docs[current].level,
-                                palette[selected],
+                                &mut editor.docs[editor.current].level,
+                                editor.palette[editor.selected],
                                 x,
                                 y,
-                                camera_x,
-                                camera_y,
+                                editor.camera_x,
+                                editor.camera_y,
                             ) {
-                                docs[current].modified = true;
-                                dirty = true;
+                                editor.mark_changed();
                             }
                         } else if mousestate.right()
                             && apply_tool(
-                                &mut docs[current].level,
+                                &mut editor.docs[editor.current].level,
                                 Tool::Erase,
                                 x,
                                 y,
-                                camera_x,
-                                camera_y,
+                                editor.camera_x,
+                                editor.camera_y,
                             )
                         {
-                            docs[current].modified = true;
-                            dirty = true;
+                            editor.mark_changed();
                         }
                     }
                 }
@@ -479,183 +754,111 @@ fn main() -> Result<(), String> {
                     mouse_btn: MouseButton::Left,
                     ..
                 } => {
-                    dragging = None;
+                    editor.dragging = None;
                 }
 
                 Event::MouseButtonDown {
                     mouse_btn, x, y, ..
                 } => {
                     if y < TOP_BAR_HEIGHT {
-                        // Top toolbar clicks
-                        if mouse_btn == MouseButton::Left {
-                            if btn_hit(PREV_BTN, x, y) {
-                                switch_to =
-                                    Some((current + docs.len() - 1) % docs.len());
-                            } else if btn_hit(NEXT_BTN, x, y) {
-                                switch_to = Some((current + 1) % docs.len());
-                            } else if btn_hit(NORMAL_BTN, x, y) {
-                                mode = Mode::Normal;
-                                dragging = None;
-                                start_new = false;
-                            } else if btn_hit(BLOCK_BTN, x, y) {
-                                // Toggle: a second click on the active mode's
-                                // button returns to Normal.
-                                mode = if mode == Mode::Path { Mode::Normal } else { Mode::Path };
-                                dragging = None;
-                                start_new = false;
-                            } else if btn_hit(DECO_BTN, x, y) {
-                                // Background and foreground are two separate deco
-                                // modes on one button: 1st click = background,
-                                // 2nd = foreground, 3rd returns to Normal.
-                                if mode != Mode::Deco {
-                                    mode = Mode::Deco;
-                                    deco_layer = DecoLayer::Background;
-                                } else if deco_layer == DecoLayer::Background {
-                                    deco_layer = DecoLayer::Foreground;
-                                } else {
-                                    mode = Mode::Normal;
-                                }
-                                dragging = None;
-                                start_new = false;
-                                if mode == Mode::Deco {
-                                    println!("Deco layer: {}", layer_name(deco_layer));
-                                }
-                            } else if btn_hit(PLAY_BTN, x, y) {
-                                launch_game(&docs[current]);
-                                // Reset pan keys so held keys don't carry over
-                                pan_left = false;
-                                pan_right = false;
-                                pan_up = false;
-                                pan_down = false;
-                            }
-                        }
-                        // Resize buttons: left = grow, right = shrink
-                        let resize_edge = if btn_hit(RESIZE_TOP_BTN, x, y) {
-                            Some(Edge::Top)
-                        } else if btn_hit(RESIZE_BOT_BTN, x, y) {
-                            Some(Edge::Bottom)
-                        } else if btn_hit(RESIZE_LEFT_BTN, x, y) {
-                            Some(Edge::Left)
-                        } else if btn_hit(RESIZE_RIGHT_BTN, x, y) {
-                            Some(Edge::Right)
-                        } else {
-                            None
-                        };
-                        if let Some(edge) = resize_edge {
-                            let changed = if mouse_btn == MouseButton::Right {
-                                docs[current].level.shrink(edge)
-                            } else {
-                                docs[current].level.grow(edge);
-                                true
-                            };
-                            if changed {
-                                docs[current].modified = true;
-                                dirty = true;
-                                set_title(&mut canvas, &docs, current, palette[selected]);
-                            }
+                        if let Some(cmd) = topbar_command(mouse_btn, x, y) {
+                            editor.execute(cmd);
                         }
                     } else if y >= HUD_TOP {
                         // The HUD bar holds the tool palette in Normal mode and a
-                        // small action menu in the Path / Deco modes.
-                        match mode {
+                        // small action menu in Path mode.
+                        match editor.mode {
                             Mode::Normal => {
                                 if mouse_btn == MouseButton::Left
-                                    && let Some(slot) = palette_slot_at(x, palette.len())
+                                    && let Some(slot) = palette_slot_at(x, editor.palette.len())
                                 {
-                                    selected = slot;
-                                    set_title(&mut canvas, &docs, current, palette[selected]);
+                                    editor.selected = slot;
+                                    editor.retitle = true;
                                 }
                             }
                             Mode::Path => {
-                                if mouse_btn == MouseButton::Left {
-                                    if btn_hit(PATH_NEW_BTN, x, y) {
-                                        // Arm a fresh block; the next click in the
-                                        // level places its first point (same as N).
-                                        start_new = true;
-                                        active_block = None;
-                                        dragging = None;
-                                    } else if btn_hit(PATH_LOOP_BTN, x, y)
-                                        && toggle_loop(&mut docs[current].level, active_block)
-                                    {
-                                        docs[current].modified = true;
-                                        dirty = true;
-                                    }
+                                if let Some(cmd) = path_menu_command(mouse_btn, x, y) {
+                                    editor.execute(cmd);
                                 }
                             }
                             // Deco mode's layer is chosen from the toolbar button,
                             // so its bottom bar stays empty.
                             Mode::Deco => {}
                         }
-                    } else if mode == Mode::Deco {
+                    } else if editor.mode == Mode::Deco {
                         // Clicking the sprite picker selects a sprite; clicking
                         // the level places (left) or erases (right) a decoration.
                         if in_deco_picker(x, y) {
                             if mouse_btn == MouseButton::Left
                                 && let Some(s) = picker_sprite_at(x, y)
                             {
-                                deco_sprite = s;
+                                editor.deco_sprite = s;
                             }
                         } else {
                             let changed = match mouse_btn {
                                 MouseButton::Left => place_deco(
-                                    &mut docs[current].level,
-                                    deco_sprite,
-                                    deco_layer,
+                                    &mut editor.docs[editor.current].level,
+                                    editor.deco_sprite,
+                                    editor.deco_layer,
                                     x,
                                     y,
-                                    camera_x,
-                                    camera_y,
+                                    editor.camera_x,
+                                    editor.camera_y,
                                 ),
                                 MouseButton::Right => erase_deco(
-                                    &mut docs[current].level,
-                                    deco_layer,
+                                    &mut editor.docs[editor.current].level,
+                                    editor.deco_layer,
                                     x,
                                     y,
-                                    camera_x,
-                                    camera_y,
+                                    editor.camera_x,
+                                    editor.camera_y,
                                 ),
                                 _ => false,
                             };
                             if changed {
-                                docs[current].modified = true;
-                                dirty = true;
+                                editor.mark_changed();
                             }
                         }
-                    } else if mode == Mode::Path {
+                    } else if editor.mode == Mode::Path {
                         let changed = match mouse_btn {
                             MouseButton::Left => path_left_click(
-                                &mut docs[current].level,
-                                &mut active_block,
-                                &mut dragging,
-                                &mut start_new,
+                                &mut editor.docs[editor.current].level,
+                                &mut editor.active_block,
+                                &mut editor.dragging,
+                                &mut editor.start_new,
                                 x,
                                 y,
-                                camera_x,
-                                camera_y,
+                                editor.camera_x,
+                                editor.camera_y,
                             ),
                             MouseButton::Right => path_right_click(
-                                &mut docs[current].level,
-                                &mut active_block,
+                                &mut editor.docs[editor.current].level,
+                                &mut editor.active_block,
                                 x,
                                 y,
-                                camera_x,
-                                camera_y,
+                                editor.camera_x,
+                                editor.camera_y,
                             ),
                             _ => false,
                         };
                         if changed {
-                            docs[current].modified = true;
-                            dirty = true;
+                            editor.mark_changed();
                         }
                     } else {
                         let tool = match mouse_btn {
-                            MouseButton::Left => palette[selected],
+                            MouseButton::Left => editor.palette[editor.selected],
                             MouseButton::Right => Tool::Erase,
                             _ => continue,
                         };
-                        if apply_tool(&mut docs[current].level, tool, x, y, camera_x, camera_y) {
-                            docs[current].modified = true;
-                            dirty = true;
+                        if apply_tool(
+                            &mut editor.docs[editor.current].level,
+                            tool,
+                            x,
+                            y,
+                            editor.camera_x,
+                            editor.camera_y,
+                        ) {
+                            editor.mark_changed();
                         }
                     }
                 }
@@ -664,46 +867,26 @@ fn main() -> Result<(), String> {
             }
         }
 
-        if docs[current].modified != was_modified {
-            set_title(&mut canvas, &docs, current, palette[selected]);
+        if editor.quit {
+            break 'running;
         }
 
-        if let Some(index) = switch_to {
-            current = index;
-            camera_x = 0.0;
-            camera_y = 0.0;
-            pan_left = false;
-            pan_right = false;
-            pan_up = false;
-            pan_down = false;
-            active_block = None;
-            dragging = None;
-            start_new = false;
-            dirty = true;
-            set_title(&mut canvas, &docs, current, palette[selected]);
+        editor.apply_switch();
+        editor.rebuild_if_dirty();
+        editor.update_camera(delta_time);
+
+        if editor.retitle {
+            set_title(
+                &mut canvas,
+                &editor.docs,
+                editor.current,
+                editor.palette[editor.selected],
+            );
+            editor.retitle = false;
         }
 
-        if dirty {
-            tilemap = TileMap::from_level(&docs[current].level);
-            player = spawn_player(&docs[current].level);
-            dirty = false;
-        }
-
-        let pan = PAN_SPEED * delta_time;
-        if pan_left { camera_x -= pan; }
-        if pan_right { camera_x += pan; }
-        if pan_up { camera_y -= pan; }
-        if pan_down { camera_y += pan; }
-
-        let tile_area_h = (HUD_TOP - TILE_AREA_TOP) as f32;
-        let level_width = tilemap.width as f32 * tilemap.tile_size as f32;
-        let level_height = tilemap.height as f32 * tilemap.tile_size as f32;
-        let max_camera_x = (level_width - VIEW_WIDTH as f32).max(0.0);
-        let max_camera_y = (level_height - tile_area_h).max(0.0);
-        camera_x = camera_x.clamp(0.0, max_camera_x);
-        camera_y = camera_y.clamp(0.0, max_camera_y);
-        let camera_xi = camera_x as i32;
-        let camera_yi = camera_y as i32;
+        let camera_xi = editor.camera_x as i32;
+        let camera_yi = editor.camera_y as i32;
 
         // Effective camera_y passed to render functions shifts tiles down by
         // TILE_AREA_TOP so they appear below the top toolbar.
@@ -711,46 +894,63 @@ fn main() -> Result<(), String> {
 
         canvas.set_draw_color(Color::RGB(135, 206, 235));
         canvas.clear();
-        tilemap.render(&mut canvas, &tilemap_texture, camera_xi, render_cam_y);
-        player.render(&mut canvas, &character_texture, camera_xi, render_cam_y);
+        editor
+            .tilemap
+            .render(&mut canvas, &tilemap_texture, camera_xi, render_cam_y);
+        editor
+            .player
+            .render(&mut canvas, &character_texture, camera_xi, render_cam_y);
         // Foreground decorations draw over the player, just as in the game.
-        tilemap.render_foreground(&mut canvas, &tilemap_texture, camera_xi, render_cam_y);
+        editor
+            .tilemap
+            .render_foreground(&mut canvas, &tilemap_texture, camera_xi, render_cam_y);
 
-        if show_grid {
-            draw_grid(&mut canvas, &tilemap, camera_xi, render_cam_y);
+        if editor.show_grid {
+            draw_grid(&mut canvas, &editor.tilemap, camera_xi, render_cam_y);
         }
         draw_paths(
             &mut canvas,
-            &docs[current].level,
-            active_block,
-            mode == Mode::Path,
+            &editor.docs[editor.current].level,
+            editor.active_block,
+            editor.mode == Mode::Path,
             camera_xi,
             render_cam_y,
         );
         draw_decorations(
             &mut canvas,
-            &docs[current].level,
-            mode == Mode::Deco,
-            deco_layer,
+            &editor.docs[editor.current].level,
+            editor.mode == Mode::Deco,
+            editor.deco_layer,
             camera_xi,
             render_cam_y,
         );
-        draw_hover(&mut canvas, &tilemap, mouse, camera_xi, render_cam_y);
-        if mode == Mode::Deco {
-            draw_deco_picker(&mut canvas, &tilemap_texture, deco_sprite);
+        draw_hover(&mut canvas, &editor.tilemap, editor.mouse, camera_xi, render_cam_y);
+        if editor.mode == Mode::Deco {
+            draw_deco_picker(&mut canvas, &tilemap_texture, editor.deco_sprite);
         }
         draw_hud(
             &mut canvas,
             &tilemap_texture,
             &character_texture,
-            &palette,
-            selected,
-            mode,
+            &editor.palette,
+            editor.selected,
+            editor.mode,
         );
-        if mode == Mode::Path {
-            draw_path_menu(&mut canvas, &docs[current].level, active_block, start_new);
+        if editor.mode == Mode::Path {
+            draw_path_menu(
+                &mut canvas,
+                &editor.docs[editor.current].level,
+                editor.active_block,
+                editor.start_new,
+            );
         }
-        draw_top_bar(&mut canvas, &docs, current, mode, deco_layer);
+        draw_top_bar(
+            &mut canvas,
+            &editor.docs,
+            editor.current,
+            editor.mode,
+            editor.deco_layer,
+        );
 
         canvas.present();
         time_provider.wait_for_next_frame();
