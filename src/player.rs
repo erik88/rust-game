@@ -237,12 +237,14 @@ impl Player {
         self.x = new_x;
         self.y = new_y;
 
-        // Check if player is on ground (tiles). A descending block overlapping
-        // him from above must not count: probing one pixel down still hits that
-        // block, which would masquerade as ground and (while holding jump) let
-        // him auto-jump every frame, riding the block's underside upward.
-        self.on_ground = self.check_collision_at(self.x, self.y + 1.0, tilemap)
-            && !self.pressed_from_above_by_block(self.x, self.y + 1.0, tilemap);
+        // Check if player is on ground. Probe solid *tiles* only, one pixel
+        // beneath the feet. A moving platform or path block must never count
+        // here: an overhead descending block would masquerade as ground (and,
+        // while holding jump, auto-jump him into its underside), and a block
+        // overlapping his side would let him jump off its flank in mid-air.
+        // Platforms genuinely supporting him from below are handled by the
+        // `feet_on_platform` check immediately after.
+        self.on_ground = self.solid_tile_at(self.x, self.y + 1.0, tilemap);
 
         // Also check if standing on a platform
         if !self.on_ground && self.vel_y >= 0.0 {
@@ -426,7 +428,14 @@ impl Player {
         }
     }
 
-    fn check_collision_at(&self, x: f32, y: f32, tilemap: &TileMap) -> bool {
+    /// True if any of the player's corners at `(x, y)` lie inside a solid tile.
+    /// Unlike [`check_collision_at`](Self::check_collision_at) this ignores moving
+    /// platforms and path blocks, so it is the correct probe for detecting solid
+    /// ground beneath the feet: a block merely overlapping the player from the
+    /// *side* must never read as ground (that would let him jump off a block's
+    /// flank in mid-air). Platforms supporting him from below are handled
+    /// separately via [`feet_on_platform`](Self::feet_on_platform).
+    fn solid_tile_at(&self, x: f32, y: f32, tilemap: &TileMap) -> bool {
         // Define the player's corners at the given position
         let corners = [
             (x, y),                                                      // Top-left
@@ -443,6 +452,15 @@ impl Player {
             if tilemap.is_solid(tile_x, tile_y) {
                 return true;
             }
+        }
+
+        false
+    }
+
+    fn check_collision_at(&self, x: f32, y: f32, tilemap: &TileMap) -> bool {
+        // Solid tiles first
+        if self.solid_tile_at(x, y, tilemap) {
+            return true;
         }
 
         // Check collision with moving platforms (they are solid obstacles)
@@ -803,6 +821,58 @@ mod tests {
                 !player.is_dead,
                 "player must not die when a descending block pushes him in mid-air \
                  (player at y = {})",
+                player.y
+            );
+        }
+    }
+
+    /// Regression test: standing beside a path block and merely pushing into its
+    /// side must not let the player jump. A horizontally-moving block overlaps the
+    /// player's torso before he resolves each frame; that side overlap previously
+    /// read as "ground" (via `check_collision_at`), so holding/pressing jump while
+    /// shoved against a block let him re-jump off its flank and climb far higher
+    /// than a normal jump. The block touches his side, not his feet, so he must
+    /// stay airborne.
+    #[test]
+    fn cannot_jump_off_the_side_of_a_path_block() {
+        // A horizontal path block starting at tile (2,2) — rect x in [80,120],
+        // y in [80,120] — moving right. The level is otherwise empty air, so
+        // there is no floor anywhere beneath the player.
+        let level = LevelData::parse(
+            "block: 2,2 5,2\n\n........\n........\n........\n........\n........\n........\n........\nP.......",
+        )
+        .unwrap();
+        let mut tilemap = TileMap::from_level(&level);
+
+        // Player hanging against the block's right flank: his left edge overlaps
+        // the block's right portion, his feet (y+38 = 123) hang well below the
+        // block's underside (120), so he is plainly not standing on top.
+        let mut player = Player::new(115.0, 85.0);
+        let start_y = player.y;
+
+        // Press jump hard against the block (held + freshly pressed) and push
+        // left into it, the worst case for spuriously re-jumping.
+        let input = InputState {
+            jump: true,
+            jump_pressed: true,
+            left: true,
+            ..Default::default()
+        };
+        let dt = 1.0 / 60.0;
+
+        for frame in 0..120 {
+            tilemap.update(dt);
+            player.update(&input, &mut tilemap, dt);
+
+            // He is never grounded by the block alone, so the jump never fires:
+            // he only ever falls away from his start, never rises above it.
+            assert!(
+                !player.on_ground,
+                "frame {frame}: a block at the player's side must not count as ground"
+            );
+            assert!(
+                player.y >= start_y - 1.0,
+                "frame {frame}: player jumped off the block's side and rose to y = {}",
                 player.y
             );
         }
