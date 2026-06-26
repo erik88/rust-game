@@ -19,9 +19,9 @@ impl Rect {
     }
 
     pub fn shrink(&self, size: f32) -> Rect {
-        return Rect {
+        Rect {
             position: Vec2d::new(self.position.x + size, self.position.y + size),
             size: Vec2d::new(self.size.x - size * 2.0, self.size.y - size * 2.0),
-        };
+        }
     }
 }

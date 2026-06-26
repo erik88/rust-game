@@ -723,7 +723,7 @@ fn main() -> Result<(), String> {
                         if changed {
                             editor.mark_changed();
                         }
-                    } else if y >= TILE_AREA_TOP && y < HUD_TOP {
+                    } else if (TILE_AREA_TOP..HUD_TOP).contains(&y) {
                         if mousestate.left() {
                             if apply_tool(
                                 &mut editor.docs[editor.current].level,
@@ -972,7 +972,7 @@ fn apply_tool(
     camera_x: f32,
     camera_y: f32,
 ) -> bool {
-    if screen_y < TILE_AREA_TOP || screen_y >= HUD_TOP {
+    if !(TILE_AREA_TOP..HUD_TOP).contains(&screen_y) {
         return false;
     }
     let world_x = screen_x as f32 + camera_x;
@@ -1012,7 +1012,7 @@ fn apply_tool(
 
 /// Whether a screen position is over the decoration sprite-picker overlay.
 fn in_deco_picker(x: i32, y: i32) -> bool {
-    x >= PICKER_X && x < PICKER_X + PICKER_W && y >= PICKER_Y && y < PICKER_Y + PICKER_H
+    (PICKER_X..PICKER_X + PICKER_W).contains(&x) && (PICKER_Y..PICKER_Y + PICKER_H).contains(&y)
 }
 
 /// The 1-based sprite-sheet index for the picker cell under a screen position,
@@ -1494,7 +1494,7 @@ fn draw_hover(
     camera_y: i32,
 ) {
     let (mx, my) = mouse;
-    if my < TILE_AREA_TOP || my >= HUD_TOP {
+    if !(TILE_AREA_TOP..HUD_TOP).contains(&my) {
         return;
     }
     let size = tilemap.tile_size as i32;

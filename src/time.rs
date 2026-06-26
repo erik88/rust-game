@@ -17,6 +17,12 @@ pub struct RealTime {
     target_frame_time: Duration,
 }
 
+impl Default for RealTime {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RealTime {
     pub fn new() -> Self {
         Self {

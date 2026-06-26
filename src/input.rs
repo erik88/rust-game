@@ -178,6 +178,12 @@ pub struct QueuedInput {
     default_state: InputState,
 }
 
+impl Default for QueuedInput {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl QueuedInput {
     pub fn new() -> Self {
         Self {
