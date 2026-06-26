@@ -450,13 +450,16 @@ mod tests {
             "Still on level 1 during transition"
         );
 
-        // The world is frozen during the transition
-        let pos_during_transition = engine.player().position();
+        // While the exit animation plays the level does not advance yet
         engine.step(&input, dt);
+        assert!(
+            engine.is_transitioning(),
+            "Still playing the exit animation"
+        );
         assert_eq!(
-            engine.player().position(),
-            pos_during_transition,
-            "Player should not move during the level transition"
+            engine.current_level(),
+            0,
+            "Level only advances once the exit animation finishes"
         );
 
         // After the transition the next level is loaded
@@ -469,6 +472,96 @@ mod tests {
         assert!(
             !engine.stopped && !engine.player().is_dead,
             "Player should be alive at the start of level 2"
+        );
+    }
+
+    #[test]
+    fn test_cannot_enter_door_from_below() {
+        use rustgamex::level::LevelData;
+
+        // An open door (no coins) floating at the top, ground far below. The
+        // single column means the door, the player and the floor share x.
+        let level = LevelData::parse("E\n.\n.\n.\nP\n1").unwrap();
+        let mut engine = GameEngine::from_levels(vec![level], OnDeath::Stop).unwrap();
+        assert!(
+            engine.tilemap().doors_open(),
+            "a coinless level opens its door immediately"
+        );
+
+        let dt = 1.0 / 60.0;
+        let input = InputState::new();
+
+        // Place the player overlapping the door but with his feet hanging well
+        // below its base (door spans y 0..40; feet at y+38 = 58). He must not
+        // be able to enter from beneath.
+        engine.player.x = 12.0;
+        engine.player.y = 20.0;
+        engine.player.on_ground = false;
+        engine.step(&input, dt);
+        assert!(
+            !engine.is_transitioning(),
+            "feet below the door base must not trigger the exit"
+        );
+
+        // Now lift him so his feet are level with the door base (y+38 = 40).
+        engine.player.x = 12.0;
+        engine.player.y = 2.0;
+        engine.player.on_ground = true;
+        engine.step(&input, dt);
+        assert!(
+            engine.is_transitioning(),
+            "feet in line with the door base may enter"
+        );
+    }
+
+    #[test]
+    fn test_exit_animation_aligns_player_with_the_door_base() {
+        use rustgamex::level::LevelData;
+        use rustgamex::player::{PLAYER_HEIGHT, PLAYER_WIDTH};
+        use rustgamex::tiles::TILE_SIZE;
+
+        // Spawn one tile left of the exit door, on flat ground.
+        let level = LevelData::parse("P.E\n111").unwrap();
+        let mut engine = GameEngine::from_levels(vec![level], OnDeath::Stop).unwrap();
+
+        let dt = 1.0 / 60.0;
+        let mut input = InputState::new();
+        input.right = true;
+
+        // Walk into the door to kick off the exit animation.
+        let mut reached = false;
+        for _ in 0..60 {
+            engine.step(&input, dt);
+            if engine.is_transitioning() {
+                reached = true;
+                break;
+            }
+        }
+        assert!(reached, "player should have reached the exit");
+
+        // Let the alignment ease run; the world is otherwise frozen.
+        let input = InputState::new();
+        for _ in 0..30 {
+            engine.step(&input, dt);
+        }
+
+        // The door is the tile at column 2, row 0. The player should be centred
+        // horizontally on it with his feet resting on its base.
+        let door_x = 2.0 * TILE_SIZE;
+        let expected_x = door_x + (TILE_SIZE - PLAYER_WIDTH as f32) / 2.0;
+        let expected_y = TILE_SIZE - PLAYER_HEIGHT as f32;
+        let player = engine.player();
+        assert!(
+            (player.x - expected_x).abs() < 0.6,
+            "player should be centred on the door (x = {}, expected {})",
+            player.x,
+            expected_x
+        );
+        assert!(
+            (player.y - expected_y).abs() < 0.6,
+            "player's feet should rest on the door base (y = {}, expected {})",
+            player.y,
+            expected_y
         );
     }
 

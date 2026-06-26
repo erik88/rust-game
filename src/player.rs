@@ -4,6 +4,18 @@ use crate::input::InputState;
 use crate::tilemap::{MovingPlatform, TileMap};
 use sdl2::render::{Texture, WindowCanvas};
 
+/// Phases of the exit sequence the player plays after reaching an open door.
+#[derive(Clone, Copy, PartialEq)]
+enum ExitPhase {
+    /// Airborne when the door was reached: fall until the feet reach the door's
+    /// base height before walking in.
+    Landing,
+    /// Walk horizontally towards the middle of the door at walking speed.
+    Walking,
+    /// Play the "stepping into the door" frames (third sprite-sheet row).
+    Entering,
+}
+
 pub struct Player {
     pub x: f32,
     pub y: f32,
@@ -28,6 +40,17 @@ pub struct Player {
     death_frame: usize,
     death_anim_timer: f32,
     pub death_anim_done: bool,
+
+    // Exit animation: when the player reaches an open door he is first eased
+    // into alignment with the door, then plays the "stepping into the door"
+    // animation (third sprite-sheet row) where he shrinks inwards.
+    pub is_exiting: bool,
+    exit_phase: ExitPhase,
+    exit_target_x: f32,
+    exit_target_y: f32,
+    exit_frame: usize,
+    exit_anim_timer: f32,
+    pub exit_anim_done: bool,
 }
 
 pub const PLAYER_WIDTH: u32 = 16;
@@ -41,6 +64,10 @@ const JUMP_RELEASE_DAMPING: f32 = 0.5; // Velocity multiplier when jump is relea
 const FRAME_DURATION: f32 = 0.25;
 const DEATH_FRAME_DURATION: f32 = 0.15;
 const DEATH_FRAMES: usize = 3;
+// Each "stepping into the door" frame plays for this long. Deliberately slower
+// than the walk/death frames so the shrink-inwards effect reads clearly.
+const EXIT_FRAME_DURATION: f32 = 0.225;
+const EXIT_FRAMES: usize = 3;
 // Vertical tolerance for treating the player's feet as standing on a platform.
 // Platforms move before the player each frame, so this must exceed the distance
 // a platform travels in one frame (100 px/s * delta_time), or the player loses
@@ -74,6 +101,13 @@ impl Player {
             death_frame: 0,
             death_anim_timer: 0.0,
             death_anim_done: false,
+            is_exiting: false,
+            exit_phase: ExitPhase::Walking,
+            exit_target_x: x,
+            exit_target_y: y,
+            exit_frame: 0,
+            exit_anim_timer: 0.0,
+            exit_anim_done: false,
         }
     }
 
@@ -166,6 +200,93 @@ impl Player {
                 self.death_frame += 1;
             } else {
                 self.death_anim_done = true;
+            }
+        }
+    }
+
+    /// Begin the exit sequence towards the door at `(target_x, target_y)`. The
+    /// player walks into the middle of the door (landing first if airborne),
+    /// then plays the "stepping inside" animation. No-op if already exiting.
+    pub fn start_exit(&mut self, target_x: f32, target_y: f32) {
+        if self.is_exiting {
+            return;
+        }
+        self.is_exiting = true;
+        // If he is already on the ground he can walk straight in; otherwise he
+        // first falls to the door's base height.
+        self.exit_phase = if self.on_ground {
+            ExitPhase::Walking
+        } else {
+            ExitPhase::Landing
+        };
+        self.exit_target_x = target_x;
+        self.exit_target_y = target_y;
+        self.exit_frame = 0;
+        self.exit_anim_timer = 0.0;
+        self.exit_anim_done = false;
+        // vel_x is intentionally kept: an airborne entry carries its horizontal
+        // momentum through the fall (see the Landing phase).
+    }
+
+    /// Advance the exit sequence: land (if airborne), walk to the middle of the
+    /// door, then play the 3-frame "entering the door" animation. Sets
+    /// `exit_anim_done` once the final frame has been shown.
+    pub fn update_exit_animation(&mut self, delta_time: f32) {
+        if self.exit_anim_done {
+            return;
+        }
+
+        match self.exit_phase {
+            ExitPhase::Landing => {
+                // Keep whatever horizontal momentum the jump had while falling to
+                // the door's base height, but stop the moment he reaches the
+                // door's middle so a sideways jump doesn't overshoot and then
+                // have to walk back in.
+                let before_x = self.x;
+                self.x += self.vel_x * delta_time;
+                if (before_x - self.exit_target_x).signum()
+                    != (self.x - self.exit_target_x).signum()
+                {
+                    self.x = self.exit_target_x;
+                    self.vel_x = 0.0;
+                }
+                self.vel_y += GRAVITY * delta_time;
+                self.y += self.vel_y * delta_time;
+                if self.y >= self.exit_target_y {
+                    self.y = self.exit_target_y;
+                    self.vel_y = 0.0;
+                    self.exit_phase = ExitPhase::Walking;
+                }
+            }
+            ExitPhase::Walking => {
+                // Step horizontally towards the door's middle at walking speed,
+                // playing the walk cycle, then begin the entering animation.
+                let dx = self.exit_target_x - self.x;
+                let step = PLAYER_SPEED * delta_time;
+                if dx.abs() <= step {
+                    self.x = self.exit_target_x;
+                    // Snap flush onto the door base (the ground rest position can
+                    // sit a pixel off) so the entering animation is centred.
+                    self.y = self.exit_target_y;
+                    self.exit_phase = ExitPhase::Entering;
+                    self.frame = 0;
+                    self.frame_time = 0.0;
+                } else {
+                    self.facing_right = dx > 0.0;
+                    self.x += step.copysign(dx);
+                    self.step_walk_animation(delta_time);
+                }
+            }
+            ExitPhase::Entering => {
+                self.exit_anim_timer += delta_time;
+                if self.exit_anim_timer >= EXIT_FRAME_DURATION {
+                    self.exit_anim_timer -= EXIT_FRAME_DURATION;
+                    if self.exit_frame < EXIT_FRAMES - 1 {
+                        self.exit_frame += 1;
+                    } else {
+                        self.exit_anim_done = true;
+                    }
+                }
             }
         }
     }
@@ -277,25 +398,27 @@ impl Player {
 
     fn update_animation(&mut self, delta_time: f32) {
         if self.vel_x.abs() > 0.1 && self.on_ground {
-            // If we just started walking (frame is 0), set it to 1
-            if self.frame == 0 {
-                self.frame = 1;
-            }
-
-            self.frame_time += delta_time;
-            if self.frame_time >= FRAME_DURATION {
-                self.frame_time = 0.0;
-                // Alternate between frames 1 and 2 for walking
-                if self.frame == 1 {
-                    self.frame = 2;
-                } else {
-                    self.frame = 1;
-                }
-            }
+            self.step_walk_animation(delta_time);
         } else {
             // Frame 0 is idle
             self.frame = 0;
             self.frame_time = 0.0;
+        }
+    }
+
+    /// Advance the two-frame walk cycle (frames 1 and 2), seeding from the idle
+    /// frame on the first step.
+    fn step_walk_animation(&mut self, delta_time: f32) {
+        // If we just started walking (frame is 0), set it to 1
+        if self.frame == 0 {
+            self.frame = 1;
+        }
+
+        self.frame_time += delta_time;
+        if self.frame_time >= FRAME_DURATION {
+            self.frame_time = 0.0;
+            // Alternate between frames 1 and 2 for walking
+            self.frame = if self.frame == 1 { 2 } else { 1 };
         }
     }
 
@@ -675,6 +798,11 @@ impl Player {
         self.death_frame = 0;
         self.death_anim_timer = 0.0;
         self.death_anim_done = false;
+        self.is_exiting = false;
+        self.exit_phase = ExitPhase::Walking;
+        self.exit_frame = 0;
+        self.exit_anim_timer = 0.0;
+        self.exit_anim_done = false;
     }
 
     pub fn render(
@@ -684,7 +812,10 @@ impl Player {
         camera_x: i32,
         camera_y: i32,
     ) {
-        let (src_x, src_y) = if self.is_dead {
+        let (src_x, src_y) = if self.is_exiting && self.exit_phase == ExitPhase::Entering {
+            // Third sprite-sheet row: the "stepping into the door" frames.
+            ((self.exit_frame * self.width as usize) as i32, (self.height * 2) as i32)
+        } else if self.is_dead {
             ((self.death_frame * self.width as usize) as i32, self.height as i32)
         } else {
             ((self.frame * self.width as usize) as i32, 0)
@@ -728,6 +859,98 @@ mod tests {
         let mut tilemap = TileMap::from_data(grid);
         tilemap.activate_platform(2, 2);
         tilemap
+    }
+
+    /// An airborne player who reaches a door must first fall to the door's base
+    /// height and only then walk horizontally towards its middle - never slide
+    /// sideways through the air. He ends flush with the door.
+    #[test]
+    fn airborne_exit_lands_before_walking_in() {
+        // Player above and to the left of the door target, airborne.
+        let mut player = Player::new(100.0, 0.0);
+        player.on_ground = false;
+
+        let target_x = 200.0;
+        let target_y = 120.0;
+        let start_x = player.x;
+        player.start_exit(target_x, target_y);
+
+        let dt = 1.0 / 60.0;
+        let mut started_walking = false;
+        for _ in 0..600 {
+            player.update_exit_animation(dt);
+
+            // The instant he first moves horizontally he must already be at the
+            // door's base height (i.e. he landed first).
+            if !started_walking && (player.x - start_x).abs() > 0.001 {
+                started_walking = true;
+                assert!(
+                    player.y >= target_y - 0.001,
+                    "player walked in mid-air before landing (y = {})",
+                    player.y
+                );
+                assert!(player.facing_right, "should face towards the door");
+            }
+
+            if player.exit_anim_done {
+                break;
+            }
+        }
+
+        assert!(started_walking, "player never walked towards the door");
+        assert!(player.exit_anim_done, "exit animation never finished");
+        assert!(
+            (player.x - target_x).abs() < 0.001 && (player.y - target_y).abs() < 0.001,
+            "player should finish flush with the door ({}, {})",
+            player.x,
+            player.y
+        );
+    }
+
+    /// An airborne entry drifts sideways while falling, but stops the moment it
+    /// reaches the door's middle so a sideways jump doesn't overshoot and then
+    /// walk back. It still ends flush with the door.
+    #[test]
+    fn airborne_exit_stops_drifting_at_the_door_middle() {
+        let mut player = Player::new(40.0, 0.0);
+        player.on_ground = false;
+        player.vel_x = PLAYER_SPEED; // drifting right towards the door
+
+        let target_x = 100.0;
+        let target_y = 120.0;
+        player.start_exit(target_x, target_y);
+
+        let dt = 1.0 / 60.0;
+
+        // First frame: still high above the door, yet already carried sideways.
+        player.update_exit_animation(dt);
+        assert!(player.y < target_y, "should still be landing");
+        assert!(
+            player.x > 40.0,
+            "horizontal momentum should carry him while airborne (x = {})",
+            player.x
+        );
+
+        // He must never overshoot the door's middle while drifting.
+        for _ in 0..600 {
+            player.update_exit_animation(dt);
+            assert!(
+                player.x <= target_x + 0.001,
+                "drift should stop at the door middle, not overshoot (x = {})",
+                player.x
+            );
+            if player.exit_anim_done {
+                break;
+            }
+        }
+
+        // Run to completion; he still ends flush with the door.
+        assert!(
+            (player.x - target_x).abs() < 0.001 && (player.y - target_y).abs() < 0.001,
+            "player should finish flush with the door ({}, {})",
+            player.x,
+            player.y
+        );
     }
 
     /// Regression test: a player pressing *into* a horizontally-moving platform

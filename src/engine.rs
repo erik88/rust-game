@@ -9,9 +9,11 @@ pub enum OnDeath {
     Stop,
 }
 
-// How long the game freezes after the player reaches an exit tile, before the
-// next level is loaded
-const LEVEL_TRANSITION_TIME: f32 = 0.7;
+// How far below a door's base the player's feet may sit and still enter it.
+// Just enough to absorb the ~1px gap the collision resolver leaves between the
+// feet and the ground the door rests on; anything more (poking into the door
+// from below) is rejected.
+const EXIT_FEET_TOLERANCE: f32 = 4.0;
 
 /// Core game engine - handles game state and logic independent of rendering
 pub struct GameEngine {
@@ -21,7 +23,6 @@ pub struct GameEngine {
     pub stopped: bool,
     levels: Vec<LevelData>,
     current_level: usize,
-    transition_timer: Option<f32>,
 }
 
 impl GameEngine {
@@ -35,7 +36,6 @@ impl GameEngine {
             stopped: false,
             levels: Vec::new(),
             current_level: 0,
-            transition_timer: None,
         }
     }
 
@@ -83,11 +83,12 @@ impl GameEngine {
             return;
         }
 
-        // During a level transition the world is frozen
-        if let Some(timer) = &mut self.transition_timer {
-            *timer -= delta_time;
-            if *timer <= 0.0 {
-                self.transition_timer = None;
+        // While the exit animation plays the world is frozen; only the player's
+        // walk-into-the-door animation advances. The next level loads once it
+        // finishes.
+        if self.player.is_exiting {
+            self.player.update_exit_animation(delta_time);
+            if self.player.exit_anim_done {
                 self.advance_level();
             }
             return;
@@ -119,11 +120,36 @@ impl GameEngine {
             return;
         }
 
-        // Check if player reached an open exit tile - start the level
-        // transition. A closed door (coins still uncollected) does nothing.
-        if self.tilemap.doors_open() && self.is_player_touching_tile_of_type(tiles::EXIT) {
-            self.transition_timer = Some(LEVEL_TRANSITION_TIME);
+        // Check if player reached an open exit tile - start the exit animation.
+        // A closed door (coins still uncollected) does nothing.
+        if self.tilemap.doors_open()
+            && let Some((target_x, target_y)) = self.exit_target()
+        {
+            self.player.start_exit(target_x, target_y);
         }
+    }
+
+    /// If the player is touching an open exit door, the position his bounding
+    /// box should ease to so he is centred horizontally on the door with his
+    /// feet resting on its base.
+    fn exit_target(&self) -> Option<(f32, f32)> {
+        // Same margin as `is_player_touching_tile_of_type`, so a player merely
+        // grazing an adjacent door doesn't trigger the exit.
+        let player_bounds = self.player.bounding_rect().shrink(2.0);
+        let feet = self.player.y + self.player.height as f32;
+        let tile_size = self.tilemap.tile_size as f32;
+        for tile in self.tilemap.tiles_of_type(tiles::EXIT) {
+            let rect = tile.get_bounding_rect();
+            let door_base = rect.position.y + rect.size.y;
+            // Only enter when the feet are level with the door's base or above
+            // it; a player merely poking into the door from below cannot enter.
+            if player_bounds.intersects(&rect) && feet <= door_base + EXIT_FEET_TOLERANCE {
+                let target_x = rect.position.x + (tile_size - self.player.width as f32) / 2.0;
+                let target_y = rect.position.y + tile_size - self.player.height as f32;
+                return Some((target_x, target_y));
+            }
+        }
+        None
     }
 
     /// Index of the level currently being played
@@ -138,9 +164,10 @@ impl GameEngine {
             .map(|l| l.name.as_str())
     }
 
-    /// True while the post-exit freeze is running
+    /// True while the player is playing the exit animation, before the next
+    /// level loads
     pub fn is_transitioning(&self) -> bool {
-        self.transition_timer.is_some()
+        self.player.is_exiting
     }
 
     fn advance_level(&mut self) {
@@ -182,17 +209,5 @@ impl GameEngine {
         self.player.on_ground
     }
 
-    fn is_player_touching_tile_of_type(&self, tile_type: u32) -> bool {
-        // Add a small margin, so that while the player is standing with one foot on solid ground,
-        // he will not touch the deadly tile.
-        let player_bounds = self.player.bounding_rect().shrink(2.0);
-
-        for tile in self.tilemap.tiles_of_type(tile_type) {
-            if player_bounds.intersects(&tile.get_bounding_rect()) {
-                return true;
-            }
-        }
-        false
-    }
 }
 
