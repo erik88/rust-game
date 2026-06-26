@@ -216,8 +216,17 @@ impl Player {
         // overlap as a vertical collision would zero vel_y and hold the player
         // aloft ("surfing" in the air). Let gravity keep pulling him down and
         // leave the horizontal ejection to handle_platforms().
+        // A descending block overlapping the player from above must not block
+        // his downward motion: it presses down on him, it cannot hold him up.
+        // Resolving it as a floor would zero vel_y and trap him inside the
+        // block. Moving *up* into it still resolves normally, so jumping into
+        // its underside instantly kills the jump. The matching downward push is
+        // applied in handle_platforms().
+        let falling_under_block =
+            self.vel_y >= 0.0 && self.pressed_from_above_by_block(new_x, new_y, tilemap);
         if self.check_collision_at(new_x, new_y, tilemap)
             && !self.embedded_in_moving_platform(new_x, self.y, tilemap)
+            && !falling_under_block
         {
             // Collision detected - try to slide to the edge of the obstacle
             new_y = self.resolve_y_position(new_x, new_y, tilemap);
@@ -228,8 +237,12 @@ impl Player {
         self.x = new_x;
         self.y = new_y;
 
-        // Check if player is on ground (tiles)
-        self.on_ground = self.check_collision_at(self.x, self.y + 1.0, tilemap);
+        // Check if player is on ground (tiles). A descending block overlapping
+        // him from above must not count: probing one pixel down still hits that
+        // block, which would masquerade as ground and (while holding jump) let
+        // him auto-jump every frame, riding the block's underside upward.
+        self.on_ground = self.check_collision_at(self.x, self.y + 1.0, tilemap)
+            && !self.pressed_from_above_by_block(self.x, self.y + 1.0, tilemap);
 
         // Also check if standing on a platform
         if !self.on_ground && self.vel_y >= 0.0 {
@@ -307,6 +320,25 @@ impl Player {
             platform.active
                 && platform.vel_x.abs() > 0.01
                 && !near_platform_top(y + self.height as f32, platform.y)
+                && player_rect.intersects(&platform.rect())
+        })
+    }
+
+    /// True if at `(x, y)` the player is overlapped from above by an active,
+    /// downward-moving block: the block's top sits at or above the player's top
+    /// and its underside has cut into the player's body. Such a block presses
+    /// *down* on him - it must never arrest his fall (that would glue him to the
+    /// block's speed or trap him inside it). The downward push is applied
+    /// separately in `handle_platforms`.
+    fn pressed_from_above_by_block(&self, x: f32, y: f32, tilemap: &TileMap) -> bool {
+        let player_rect = Rect::new(
+            Vec2d::new(x, y),
+            Vec2d::new(self.width as f32, self.height as f32),
+        );
+        tilemap.platforms().any(|platform| {
+            platform.active
+                && platform.vel_y > 0.0
+                && platform.y <= y
                 && player_rect.intersects(&platform.rect())
         })
     }
@@ -573,25 +605,40 @@ impl Player {
             self.vel_y = 0.0;
         }
 
-        // Downward-moving platform crushing player against solid ground below
-        let on_solid = self.check_collision_at(self.x, self.y + 1.0, tilemap);
-        if on_solid {
-            for platform in tilemap.platforms() {
-                if !platform.active || platform.vel_y <= 0.0 {
-                    continue;
-                }
-                let rect = platform.rect();
-                let h_overlap = self.x + self.width as f32 > rect.position.x
-                    && self.x < rect.position.x + rect.size.x;
-                if !h_overlap {
-                    continue;
-                }
-                // Platform has moved into the player's body from above
-                let platform_bottom = rect.position.y + rect.size.y;
-                if rect.position.y < self.y + self.height as f32 && platform_bottom > self.y {
+        // A downward-moving block pressing on the player from above. The block
+        // can never hold him up: it shoves him down while it descends faster
+        // than he is falling, and otherwise he simply falls away from it under
+        // gravity - whichever is the greater downward motion wins. If solid
+        // support sits beneath him so he cannot be pushed clear, he is crushed.
+        for platform in tilemap.platforms() {
+            if !platform.active || platform.vel_y <= 0.0 {
+                continue;
+            }
+            let rect = platform.rect();
+            let h_overlap = self.x + self.width as f32 > rect.position.x
+                && self.x < rect.position.x + rect.size.x;
+            if !h_overlap {
+                continue;
+            }
+            // Only act when the block is above the player with its underside
+            // cutting into him; a block at or below his feet is a ride/up-push
+            // case handled earlier.
+            let block_bottom = rect.position.y + rect.size.y;
+            if rect.position.y <= self.y && block_bottom > self.y {
+                // Push him down flush with the block's underside, unless solid
+                // ground blocks the way - then he is crushed against it.
+                if self.check_collision_at(self.x, block_bottom, tilemap) {
                     self.is_dead = true;
                     return;
                 }
+                self.y = block_bottom;
+                // Hand the block's downward speed to the player so he is flung
+                // off its underside instead of being carried along at the
+                // block's pace. Gravity then accelerates him clear of the block
+                // within a frame - he can never ride beneath it, not even while
+                // holding jump (which only matters while moving upward). This
+                // also discards any leftover upward jump velocity.
+                self.vel_y = self.vel_y.max(platform.vel_y);
             }
         }
     }
@@ -651,6 +698,7 @@ impl Player {
 mod tests {
     use super::*;
     use crate::input::InputState;
+    use crate::level::LevelData;
     use crate::tiles;
 
     /// Build a 10x10 level of open air with a single right-moving platform
@@ -716,5 +764,134 @@ mod tests {
             start_y,
             player.y
         );
+    }
+
+    /// Regression test: a player who jumps upward into the underside of a
+    /// downward-moving path block must not die. The block descends onto his head
+    /// in mid-air with nothing solid beneath him, so it can only block/shove him,
+    /// never crush him. The crush death only applies when a descending block
+    /// pins the player against solid ground below; this guards that distinction.
+    #[test]
+    fn player_survives_jumping_up_into_a_descending_path_block() {
+        // A vertical path block in column 3 travelling from tile row 1 down to
+        // row 8. It starts on its top point (pixel rect x in [120,160],
+        // y in [40,80]) and moves downward. The grid is otherwise empty air, so
+        // there is no floor for the block to crush the player against.
+        let level = LevelData::parse(
+            "block: 3,1 3,8\n\n........\n........\n........\n........\n........\n........\n........\n........\n........\nP.......",
+        )
+        .unwrap();
+        let mut tilemap = TileMap::from_level(&level);
+
+        // Spawn the player just below the block's bottom edge (y = 80) and
+        // horizontally inside its span, then launch him upward into it. Nothing
+        // solid sits beneath him.
+        let mut player = Player::new(130.0, 82.0);
+        player.vel_y = -JUMP_SPEED;
+
+        let input = InputState::default();
+        let dt = 1.0 / 60.0;
+
+        // Run a full second: long enough for the descending block to travel down
+        // through the player's starting region and shove against him repeatedly.
+        for _ in 0..60 {
+            // Mirror the engine loop: the tilemap (path blocks) updates before
+            // the player.
+            tilemap.update(dt);
+            player.update(&input, &mut tilemap, dt);
+            assert!(
+                !player.is_dead,
+                "player must not die when a descending block pushes him in mid-air \
+                 (player at y = {})",
+                player.y
+            );
+        }
+    }
+
+    /// A player who jumps up into the underside of a descending path block must
+    /// instantly lose his jump and be flung downward - never *ride* flush along
+    /// the block's underside. Once he is hit he must fall strictly faster than
+    /// the block descends, pulling away from it under gravity. This must hold
+    /// even while *holding jump*: a block overhead must not register as ground
+    /// (which would auto-jump him every frame and glue him to the underside).
+    #[test]
+    fn cannot_ride_below_a_descending_block_even_holding_jump() {
+        for hold_jump in [false, true] {
+            let level = LevelData::parse(
+                "block: 3,1 3,8\n\n........\n........\n........\n........\n........\n........\n........\n........\n........\nP.......",
+            )
+            .unwrap();
+            let mut tilemap = TileMap::from_level(&level);
+
+            // Player just below the block's underside (y = 80), inside its
+            // column, launched straight up into it.
+            let mut player = Player::new(130.0, 82.0);
+            player.vel_y = -JUMP_SPEED;
+            let start_y = player.y;
+
+            let input = InputState {
+                jump: hold_jump,
+                ..Default::default()
+            };
+            let dt = 1.0 / 60.0;
+
+            let mut prev_gap = f32::NEG_INFINITY;
+            for frame in 0..30 {
+                tilemap.update(dt);
+                // The block's underside and descent speed *after* this frame's
+                // move.
+                let (block_bottom, block_speed) = {
+                    let b = tilemap.platforms().next().unwrap();
+                    (b.y + b.rect().size.y, b.vel_y)
+                };
+
+                player.update(&input, &mut tilemap, dt);
+                let gap = player.y - block_bottom; // player's top below the block
+
+                assert!(!player.is_dead, "hold={hold_jump} frame {frame}: must not die");
+                // The upward jump is gone immediately and never returns.
+                assert!(
+                    player.vel_y >= -0.01,
+                    "hold={hold_jump} frame {frame}: jump should be lost, vel_y = {}",
+                    player.vel_y
+                );
+                // He never wedges up inside the block (stays at/below its
+                // underside) and never surfs back above his start.
+                assert!(
+                    gap >= -0.01,
+                    "hold={hold_jump} frame {frame}: player wedged into block (gap {gap})"
+                );
+                assert!(
+                    player.y >= start_y - 1.0,
+                    "hold={hold_jump} frame {frame}: player rode back up past start (y {})",
+                    player.y
+                );
+
+                // Past the initial contact frames he must be outrunning the
+                // block: falling faster than it descends, with the gap to its
+                // underside strictly growing - i.e. not riding it.
+                if frame >= 2 {
+                    assert!(
+                        player.vel_y > block_speed,
+                        "hold={hold_jump} frame {frame}: player should fall faster than \
+                         the block ({} vs {block_speed})",
+                        player.vel_y
+                    );
+                    assert!(
+                        gap > prev_gap + 0.01,
+                        "hold={hold_jump} frame {frame}: gap to the block should keep \
+                         growing ({prev_gap} -> {gap})"
+                    );
+                }
+                prev_gap = gap;
+            }
+
+            // He ends up well clear below the block, not stuck at the spawn.
+            assert!(
+                player.y > start_y + 100.0,
+                "hold={hold_jump}: player should have fallen well clear, only reached y = {}",
+                player.y
+            );
+        }
     }
 }
