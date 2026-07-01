@@ -5,9 +5,10 @@
 //! paint tiles onto the grid. Edits are kept in memory per level and are only
 //! written to disk when you save, so switching levels never loses work.
 //!
-//! The editor has four mutually-exclusive modes, switched with the grouped
+//! The editor has five mutually-exclusive modes, switched with the grouped
 //! toolbar buttons (or the keys noted below): Normal (paint tiles), Path (edit
-//! path blocks), Deco (place decorations) and Exit (route exit doors). The
+//! path blocks), Deco (place decorations), Exit (route exit doors) and Select
+//! (mark a rectangular block of tiles and drag it to move or copy it). The
 //! bottom tool palette holds the world-building tiles in Normal mode and the
 //! exit doors / coins in Exit mode.
 //!
@@ -58,10 +59,23 @@
 //! - Decorations live on two layers: background (behind the player, coins and
 //!   platforms) and foreground (in front of them, so they can hide them). These
 //!   are two separate deco modes, both on the decoration toolbar button: click
-//!   it once for the background layer, again for the foreground layer, a third
-//!   time to return to Normal. The button shows a two-square "layers" badge with
+//!   it once for the background layer, and again to toggle to the foreground
+//!   layer (further clicks keep toggling; use another mode button to leave deco
+//!   mode). The button shows a two-square "layers" badge with
 //!   the active layer lit. The overlay brackets are magenta for background and
 //!   orange for foreground, brightest for the layer being edited.
+//!
+//! Region select / move (rearrange a rectangular block of tiles):
+//! - F5 : enter select mode, or click the SEL button
+//! - Left-drag over empty area : rubber-band a rectangular selection of cells
+//! - Left-drag from inside the selection : move the whole block; it drops where
+//!   the cursor releases (a yellow outline previews the landing spot)
+//! - Ctrl + left-drag from inside the selection : copy the block instead of
+//!   moving it (the preview outline turns green)
+//! - Right-click : clear the selection
+//! - Delete / Backspace : erase every tile in the selection
+//! - Only the tile grid moves; exit routing for any moved door is kept loadable
+//!   but a door dragged to a new cell is re-routed to the default destination.
 
 use sdl2::event::Event;
 use sdl2::keyboard::{Keycode, Mod};
@@ -145,6 +159,8 @@ const RESIZE_LEFT_BTN: (i32, i32, u32, u32) = (660, BTN_Y, 36, BTN_H);
 const RESIZE_RIGHT_BTN: (i32, i32, u32, u32) = (700, BTN_Y, 36, BTN_H);
 // Fourth mode button: edit exit doors.
 const EXIT_BTN: (i32, i32, u32, u32) = (MODE_BTN_X0 + 3 * MODE_BTN_STEP, BTN_Y, MODE_BTN_W, BTN_H);
+// Fifth mode button: rectangular region select / move.
+const SELECT_BTN: (i32, i32, u32, u32) = (MODE_BTN_X0 + 4 * MODE_BTN_STEP, BTN_Y, MODE_BTN_W, BTN_H);
 // Play button
 const PLAY_BTN: (i32, i32, u32, u32) = (748, BTN_Y, 44, BTN_H);
 
@@ -226,6 +242,8 @@ enum Mode {
     Deco,
     /// Select exit doors and set where each one leads.
     Exit,
+    /// Select a rectangular block of tiles and drag it to move or copy it.
+    Select,
 }
 
 impl Mode {
@@ -235,6 +253,7 @@ impl Mode {
             Mode::Path => "Path blocks",
             Mode::Deco => "Decorations",
             Mode::Exit => "Exit doors",
+            Mode::Select => "Select (region)",
         }
     }
 }
@@ -277,6 +296,56 @@ enum Drag {
     Segment(usize),
 }
 
+/// A rectangular block of tile cells selected in [`Mode::Select`], as inclusive
+/// tile bounds: `min` is the top-left corner, `max` the bottom-right.
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct Selection {
+    min: (usize, usize),
+    max: (usize, usize),
+}
+
+impl Selection {
+    /// The rectangle spanning two (possibly unordered) corner cells.
+    fn from_corners(a: (usize, usize), b: (usize, usize)) -> Selection {
+        Selection {
+            min: (a.0.min(b.0), a.1.min(b.1)),
+            max: (a.0.max(b.0), a.1.max(b.1)),
+        }
+    }
+
+    /// A `w`x`h` selection with its top-left at `min`.
+    fn at(min: (usize, usize), w: usize, h: usize) -> Selection {
+        Selection {
+            min,
+            max: (min.0 + w - 1, min.1 + h - 1),
+        }
+    }
+
+    fn width(&self) -> usize {
+        self.max.0 - self.min.0 + 1
+    }
+
+    fn height(&self) -> usize {
+        self.max.1 - self.min.1 + 1
+    }
+
+    fn contains(&self, t: (usize, usize)) -> bool {
+        (self.min.0..=self.max.0).contains(&t.0) && (self.min.1..=self.max.1).contains(&t.1)
+    }
+}
+
+/// The in-progress pointer interaction while in [`Mode::Select`].
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum SelectDrag {
+    /// Rubber-band selecting: `anchor` is the fixed corner; the moving corner is
+    /// the cell under the cursor.
+    Marquee { anchor: (usize, usize) },
+    /// Moving (or, when `copy`, copying) the current selection. `grab` is the
+    /// offset from the selection's top-left to the grabbed cell, so the block
+    /// tracks the cursor.
+    Move { grab: (usize, usize), copy: bool },
+}
+
 /// A level being edited, paired with the file it came from.
 struct Document {
     path: PathBuf,
@@ -315,7 +384,7 @@ enum UICommand {
     SetMode(Mode),
     /// Path button: toggle between Path mode and Normal.
     ToggleBlockMode,
-    /// Deco button: cycle Normal -> background -> foreground -> Normal.
+    /// Deco button: enter deco mode on background, then toggle background <-> foreground.
     CycleDecoMode,
     /// F3: enter deco mode, flipping the active layer on each press.
     FlipDecoLayer,
@@ -329,6 +398,8 @@ enum UICommand {
     DeleteBlock,
     /// Cycle which path block is active.
     CycleBlock,
+    /// Erase every tile in the current Select-mode selection.
+    EraseSelection,
     /// Toggle the grid overlay.
     ToggleGrid,
     /// Open the full-list level browser overlay (click a row to jump).
@@ -377,6 +448,13 @@ struct Editor {
     deco_layer: DecoLayer,
     /// The exit door currently selected for editing (grid coords), in `Mode::Exit`.
     selected_door: Option<(usize, usize)>,
+    /// The current rectangular tile selection, in `Mode::Select`.
+    selection: Option<Selection>,
+    /// The in-progress selection drag (rubber-band or move/copy), in `Mode::Select`.
+    select_drag: Option<SelectDrag>,
+    /// Whether a Ctrl key is currently held, so a Select-mode drag copies instead
+    /// of moves. Tracked from key events since mouse events carry no modifiers.
+    copy_mod: bool,
     /// The open full-list level overlay, if any (level browser / destination picker).
     overlay: Option<Overlay>,
     /// Rendered view of the current level, rebuilt from it whenever `dirty`.
@@ -417,6 +495,9 @@ impl Editor {
             deco_sprite: 1,
             deco_layer: DecoLayer::Background,
             selected_door: None,
+            selection: None,
+            select_drag: None,
+            copy_mod: false,
             overlay: None,
             tilemap,
             player,
@@ -446,19 +527,18 @@ impl Editor {
             }
             UICommand::CycleDecoMode => {
                 // Background and foreground are two separate deco modes on one
-                // button: 1st click = background, 2nd = foreground, 3rd = Normal.
+                // button: the first click enters background; further clicks just
+                // toggle between background and foreground (never back to Normal,
+                // use another mode button for that).
                 if self.mode != Mode::Deco {
                     self.deco_layer = DecoLayer::Background;
-                    self.set_mode(Mode::Deco);
                 } else if self.deco_layer == DecoLayer::Background {
                     self.deco_layer = DecoLayer::Foreground;
-                    self.set_mode(Mode::Deco);
                 } else {
-                    self.set_mode(Mode::Normal);
+                    self.deco_layer = DecoLayer::Background;
                 }
-                if self.mode == Mode::Deco {
-                    println!("Deco layer: {}", layer_name(self.deco_layer));
-                }
+                self.set_mode(Mode::Deco);
+                println!("Deco layer: {}", layer_name(self.deco_layer));
             }
             UICommand::FlipDecoLayer => {
                 self.deco_layer = if self.deco_layer == DecoLayer::Foreground {
@@ -503,6 +583,19 @@ impl Editor {
                 self.active_block = (n > 0).then(|| self.active_block.map_or(0, |b| (b + 1) % n));
                 self.dragging = None;
             }
+            UICommand::EraseSelection => {
+                if let Some(sel) = self.selection {
+                    let dest = self.default_exit_dest();
+                    let level = &mut self.docs[self.current].level;
+                    for ty in sel.min.1..=sel.max.1 {
+                        for tx in sel.min.0..=sel.max.0 {
+                            level.tiles[ty][tx] = tiles::EMPTY;
+                            reconcile_exit(level, (tx, ty), &dest);
+                        }
+                    }
+                    self.mark_changed();
+                }
+            }
             UICommand::ToggleGrid => self.show_grid = !self.show_grid,
             UICommand::OpenLevels => {
                 self.overlay = Some(Overlay::Jump);
@@ -535,6 +628,11 @@ impl Editor {
         if mode != Mode::Exit {
             self.selected_door = None;
         }
+        // The tile selection only makes sense in Select mode; drop it otherwise.
+        if mode != Mode::Select {
+            self.selection = None;
+        }
+        self.select_drag = None;
         println!("Mode: {}", mode.name());
     }
 
@@ -585,6 +683,70 @@ impl Editor {
     }
 
 
+    /// Handle a mouse-button press in the tile area while in [`Mode::Select`].
+    /// Left inside the current selection starts a move (a copy while Ctrl is
+    /// held); left elsewhere starts a fresh rubber-band selection; right clears
+    /// the selection.
+    fn select_press(&mut self, btn: MouseButton, x: i32, y: i32) {
+        let Some(tile) = cursor_tile(
+            &self.docs[self.current].level,
+            x,
+            y,
+            self.camera_x,
+            self.camera_y,
+        ) else {
+            return;
+        };
+        match btn {
+            MouseButton::Left => {
+                if let Some(sel) = self.selection.filter(|s| s.contains(tile)) {
+                    let grab = (tile.0 - sel.min.0, tile.1 - sel.min.1);
+                    self.select_drag = Some(SelectDrag::Move {
+                        grab,
+                        copy: self.copy_mod,
+                    });
+                } else {
+                    self.selection = Some(Selection::from_corners(tile, tile));
+                    self.select_drag = Some(SelectDrag::Marquee { anchor: tile });
+                }
+            }
+            MouseButton::Right => {
+                self.selection = None;
+                self.select_drag = None;
+            }
+            _ => {}
+        }
+    }
+
+    /// End a Select-mode pointer drag: commit a pending move/copy of the block to
+    /// wherever the cursor released, then clear the drag. A no-op for a rubber-band
+    /// drag (the selection was already updated as the cursor moved).
+    fn finish_select_drag(&mut self) {
+        let Some(SelectDrag::Move { grab, copy }) = self.select_drag.take() else {
+            return;
+        };
+        let Some(sel) = self.selection else {
+            return;
+        };
+        let camera_x = self.camera_x as i32;
+        let render_cam_y = self.camera_y as i32 - TILE_AREA_TOP;
+        let Some(cursor) = cursor_tile_i(self.mouse, camera_x, render_cam_y) else {
+            return;
+        };
+        let (w, h) = {
+            let level = &self.docs[self.current].level;
+            (level.width(), level.height())
+        };
+        let target = clamp_move_target(w, h, sel, grab, cursor);
+        if target == sel.min {
+            return;
+        }
+        let dest = self.default_exit_dest();
+        move_selection(&mut self.docs[self.current].level, sel, target, copy, &dest);
+        self.selection = Some(Selection::at(target, sel.width(), sel.height()));
+        self.mark_changed();
+    }
+
     /// Queue a move by `delta` levels (negative = previous), wrapping around.
     fn switch_level(&mut self, delta: isize) {
         let n = self.docs.len();
@@ -610,6 +772,8 @@ impl Editor {
             self.dragging = None;
             self.start_new = false;
             self.selected_door = None;
+            self.selection = None;
+            self.select_drag = None;
             self.dirty = true;
             self.retitle = true;
         }
@@ -677,10 +841,12 @@ fn key_command(key: Keycode, ctrl: bool, shift: bool, mode: Mode) -> Option<UICo
         Keycode::F2 => UICommand::SetMode(Mode::Path),
         Keycode::F3 => UICommand::FlipDecoLayer,
         Keycode::F4 => UICommand::SetMode(Mode::Exit),
+        Keycode::F5 => UICommand::SetMode(Mode::Select),
         Keycode::N if mode == Mode::Path => UICommand::NewBlock,
         Keycode::Tab if mode == Mode::Path => UICommand::CycleBlock,
         Keycode::L if mode == Mode::Path => UICommand::ToggleLoop,
         Keycode::Delete | Keycode::Backspace if mode == Mode::Path => UICommand::DeleteBlock,
+        Keycode::Delete | Keycode::Backspace if mode == Mode::Select => UICommand::EraseSelection,
         // Tab opens the level browser everywhere except path mode (where it
         // cycles blocks).
         Keycode::Tab => UICommand::OpenLevels,
@@ -703,6 +869,8 @@ fn topbar_command(btn: MouseButton, x: i32, y: i32) -> Option<UICommand> {
             return Some(UICommand::CycleDecoMode);
         } else if btn_hit(EXIT_BTN, x, y) {
             return Some(UICommand::SetMode(Mode::Exit));
+        } else if btn_hit(SELECT_BTN, x, y) {
+            return Some(UICommand::SetMode(Mode::Select));
         } else if btn_hit(PLAY_BTN, x, y) {
             return Some(UICommand::Play);
         }
@@ -793,7 +961,7 @@ fn main() -> Result<(), String> {
 
     let texture_creator = canvas.texture_creator();
     let character_texture = load_png_texture(&texture_creator, "character.png")?;
-    let tilemap_texture = load_png_texture(&texture_creator, "tilemap.png")?;
+    let mut tilemap_texture = load_png_texture(&texture_creator, "tilemap.png")?;
 
     let mut event_pump = sdl_context.event_pump()?;
     let mut time_provider = RealTime::new();
@@ -820,6 +988,8 @@ fn main() -> Result<(), String> {
                 } => {
                     let ctrl = keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD);
                     let shift = keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD);
+                    // Track Ctrl so a Select-mode drag copies instead of moves.
+                    editor.copy_mod = ctrl;
                     if key == Keycode::Escape && editor.overlay.is_some() {
                         // Esc dismisses an open overlay before it means "quit".
                         editor.execute(UICommand::CloseOverlay);
@@ -844,6 +1014,7 @@ fn main() -> Result<(), String> {
                     Keycode::Right | Keycode::D => editor.pan.right = false,
                     Keycode::Up | Keycode::W => editor.pan.up = false,
                     Keycode::Down | Keycode::S => editor.pan.down = false,
+                    Keycode::LCtrl | Keycode::RCtrl => editor.copy_mod = false,
                     _ => {}
                 },
 
@@ -953,6 +1124,20 @@ fn main() -> Result<(), String> {
                         {
                             editor.mark_changed();
                         }
+                    } else if editor.mode == Mode::Select {
+                        // Rubber-band: grow the selection to the cursor. A move
+                        // drag needs no state here — its preview follows the mouse.
+                        if let Some(SelectDrag::Marquee { anchor }) = editor.select_drag
+                            && let Some(tile) = cursor_tile(
+                                &editor.docs[editor.current].level,
+                                x,
+                                y,
+                                editor.camera_x,
+                                editor.camera_y,
+                            )
+                        {
+                            editor.selection = Some(Selection::from_corners(anchor, tile));
+                        }
                     }
                 }
 
@@ -961,6 +1146,9 @@ fn main() -> Result<(), String> {
                     ..
                 } => {
                     editor.dragging = None;
+                    if editor.mode == Mode::Select {
+                        editor.finish_select_drag();
+                    }
                 }
 
                 Event::MouseButtonDown {
@@ -1009,6 +1197,8 @@ fn main() -> Result<(), String> {
                             // Deco mode's layer is chosen from the toolbar button,
                             // so its bottom bar stays empty.
                             Mode::Deco => {}
+                            // Select mode has no bottom-bar tools.
+                            Mode::Select => {}
                         }
                     } else if editor.mode == Mode::Exit {
                         // Paint the selected exit tool (left) or erase (right); the
@@ -1100,6 +1290,8 @@ fn main() -> Result<(), String> {
                         if changed {
                             editor.mark_changed();
                         }
+                    } else if editor.mode == Mode::Select {
+                        editor.select_press(mouse_btn, x, y);
                     } else {
                         // Normal mode: paint the selected tool (left) or erase (right).
                         let tool = match mouse_btn {
@@ -1184,6 +1376,18 @@ fn main() -> Result<(), String> {
             render_cam_y,
         );
         draw_hover(&mut canvas, &editor.tilemap, editor.mouse, camera_xi, render_cam_y);
+        if editor.mode == Mode::Select {
+            draw_selection(
+                &mut canvas,
+                &mut tilemap_texture,
+                &editor.docs[editor.current].level,
+                editor.selection,
+                editor.select_drag,
+                editor.mouse,
+                camera_xi,
+                render_cam_y,
+            );
+        }
         if editor.mode == Mode::Exit {
             draw_exits(
                 &mut canvas,
@@ -1506,6 +1710,87 @@ fn cursor_tile(
         return None;
     }
     Some((tx as usize, ty as usize))
+}
+
+/// Tile coordinates (possibly outside the grid) under a screen position, using
+/// the same integer render camera the tiles are drawn with — `camera_x` is the
+/// truncated horizontal camera and `render_cam_y` is `camera_y - TILE_AREA_TOP`.
+/// Kept int-for-int consistent with rendering so the Select-mode move preview and
+/// the committed move always land on the same cell. `None` outside the tile area.
+fn cursor_tile_i(mouse: (i32, i32), camera_x: i32, render_cam_y: i32) -> Option<(i32, i32)> {
+    let (mx, my) = mouse;
+    if !(TILE_AREA_TOP..HUD_TOP).contains(&my) {
+        return None;
+    }
+    let size = TILE_SIZE as i32;
+    let world_x = mx + camera_x;
+    let world_y = my + render_cam_y;
+    if world_x < 0 || world_y < 0 {
+        return None;
+    }
+    Some((world_x / size, world_y / size))
+}
+
+/// Where a selection's top-left should land when its `grab` cell follows the
+/// cursor, clamped so the whole block stays inside a `width`x`height` grid.
+fn clamp_move_target(
+    width: usize,
+    height: usize,
+    sel: Selection,
+    grab: (usize, usize),
+    cursor: (i32, i32),
+) -> (usize, usize) {
+    let max_x = (width as i32 - sel.width() as i32).max(0);
+    let max_y = (height as i32 - sel.height() as i32).max(0);
+    let tx = (cursor.0 - grab.0 as i32).clamp(0, max_x);
+    let ty = (cursor.1 - grab.1 as i32).clamp(0, max_y);
+    (tx as usize, ty as usize)
+}
+
+/// Move (or, when `copy`, copy) the block of tiles in `sel` so its top-left lands
+/// at `target`. Both `sel` and `target` must lie fully inside the grid. Exit
+/// routing for every touched cell is reconciled afterwards so the level stays
+/// loadable; a moved door keeps its cell's routing only if it does not leave that
+/// cell, otherwise it is re-routed to `default_dest`.
+fn move_selection(
+    level: &mut LevelData,
+    sel: Selection,
+    target: (usize, usize),
+    copy: bool,
+    default_dest: &str,
+) {
+    let (w, h) = (sel.width(), sel.height());
+    // Snapshot the block first: source and target may overlap.
+    let mut cells = vec![vec![tiles::EMPTY; w]; h];
+    for (r, row) in cells.iter_mut().enumerate() {
+        for (c, cell) in row.iter_mut().enumerate() {
+            *cell = level.tiles[sel.min.1 + r][sel.min.0 + c];
+        }
+    }
+
+    let mut touched: Vec<(usize, usize)> = Vec::new();
+    if !copy {
+        for r in 0..h {
+            for c in 0..w {
+                let cell = (sel.min.0 + c, sel.min.1 + r);
+                level.tiles[cell.1][cell.0] = tiles::EMPTY;
+                touched.push(cell);
+            }
+        }
+    }
+    for (r, row) in cells.iter().enumerate() {
+        for (c, &val) in row.iter().enumerate() {
+            let cell = (target.0 + c, target.1 + r);
+            level.tiles[cell.1][cell.0] = val;
+            touched.push(cell);
+        }
+    }
+
+    touched.sort_unstable();
+    touched.dedup();
+    for cell in touched {
+        reconcile_exit(level, cell, default_dest);
+    }
 }
 
 /// Handle a left-click while in path mode: select/drag an existing point, or
@@ -1831,6 +2116,97 @@ fn draw_hover(
         size as u32,
         size as u32,
     ));
+}
+
+/// Draw the Select-mode overlay: the current selection as a translucent blue
+/// rectangle, plus, while a move/copy drag is in progress, a 50%-transparent
+/// preview of the selected tiles at their drop location and an outline showing
+/// where the block will land (green for copy, yellow for move). `camera_x` is the
+/// truncated horizontal camera and `camera_y` is `camera_yi - TILE_AREA_TOP`, so
+/// the math mirrors [`draw_hover`]. Clipped to the play area.
+#[allow(clippy::too_many_arguments)]
+fn draw_selection(
+    canvas: &mut WindowCanvas,
+    tilemap_texture: &mut Texture,
+    level: &LevelData,
+    selection: Option<Selection>,
+    select_drag: Option<SelectDrag>,
+    mouse: (i32, i32),
+    camera_x: i32,
+    camera_y: i32,
+) {
+    let Some(sel) = selection else {
+        return;
+    };
+    let size = TILE_SIZE as i32;
+    let prev_clip = canvas.clip_rect();
+    canvas.set_clip_rect(Rect::new(
+        0,
+        TILE_AREA_TOP,
+        VIEW_WIDTH,
+        (HUD_TOP - TILE_AREA_TOP) as u32,
+    ));
+
+    let rect_for = |min: (usize, usize), w: usize, h: usize| {
+        Rect::new(
+            min.0 as i32 * size - camera_x,
+            min.1 as i32 * size - camera_y,
+            (w * TILE_SIZE as usize) as u32,
+            (h * TILE_SIZE as usize) as u32,
+        )
+    };
+
+    let r = rect_for(sel.min, sel.width(), sel.height());
+    canvas.set_draw_color(Color::RGBA(90, 170, 255, 60));
+    let _ = canvas.fill_rect(r);
+    canvas.set_draw_color(Color::RGB(120, 200, 255));
+    let _ = canvas.draw_rect(r);
+
+    // While dragging the block, show where it will land.
+    if let Some(SelectDrag::Move { grab, copy }) = select_drag
+        && let Some(cursor) = cursor_tile_i(mouse, camera_x, camera_y)
+    {
+        let target = clamp_move_target(level.width(), level.height(), sel, grab, cursor);
+
+        // Render the picked-up tiles at 50% transparency at the drop location so
+        // you can see exactly what is being placed.
+        tilemap_texture.set_alpha_mod(128);
+        for r in 0..sel.height() {
+            for c in 0..sel.width() {
+                let tile = level.tiles[sel.min.1 + r][sel.min.0 + c];
+                if tile == tiles::EMPTY {
+                    continue;
+                }
+                let (sx, sy) = tiles::tile_src_xy(tile);
+                let src = Rect::new(sx, sy, TILE_SIZE as u32, TILE_SIZE as u32);
+                let dst = Rect::new(
+                    (target.0 + c) as i32 * size - camera_x,
+                    (target.1 + r) as i32 * size - camera_y,
+                    TILE_SIZE as u32,
+                    TILE_SIZE as u32,
+                );
+                let _ = canvas.copy(tilemap_texture, Some(src), Some(dst));
+            }
+        }
+        tilemap_texture.set_alpha_mod(255);
+
+        let pr = rect_for(target, sel.width(), sel.height());
+        let color = if copy {
+            Color::RGB(120, 235, 140)
+        } else {
+            Color::RGB(255, 235, 90)
+        };
+        canvas.set_draw_color(color);
+        let _ = canvas.draw_rect(pr);
+        let _ = canvas.draw_rect(Rect::new(
+            pr.x() + 1,
+            pr.y() + 1,
+            pr.width().saturating_sub(2),
+            pr.height().saturating_sub(2),
+        ));
+    }
+
+    canvas.set_clip_rect(prev_clip);
 }
 
 /// Draw the path-block overlay: each block's control points joined by lines,
@@ -2458,6 +2834,8 @@ fn draw_top_bar(
     );
     // Exit-door mode button.
     draw_text_button(canvas, EXIT_BTN, "EXIT", mode == Mode::Exit);
+    // Region select / move mode button.
+    draw_text_button(canvas, SELECT_BTN, "SEL", mode == Mode::Select);
 
     // --- Separator before resize ---
     canvas.set_draw_color(Color::RGB(80, 80, 100));
@@ -2731,7 +3109,7 @@ fn print_controls() {
     println!("  Arrows / WASD: pan camera              Home        : scroll to start");
     println!("  Ctrl+Arrow  : grow canvas at that edge Ctrl+Shift+Arrow: shrink that edge");
     println!("  G           : toggle grid              Ctrl+S      : save level");
-    println!("  Modes (toolbar/keys): F1 Normal tiles | F2 path blocks | F3 decorations | F4 exit doors");
+    println!("  Modes (toolbar/keys): F1 Normal tiles | F2 path blocks | F3 decorations | F4 exit doors | F5 select");
     println!("  Levels      : the 'Lv n/m' button or Tab opens the level browser; click a level to jump");
     println!("  Normal mode : click palette bar to pick a tool, left-click paints, right-click erases");
     println!("                (world tiles only; exit doors and coins moved to Exit mode)");
@@ -2739,9 +3117,11 @@ fn print_controls() {
     println!("                N new block, L open/close loop, Tab cycle, Del remove block");
     println!("                (bottom bar shows New-block and Toggle-loop buttons)");
     println!("  Deco mode   : click picker to choose a sprite, left-click places, right-click erases");
-    println!("                deco toolbar button: 1st click = background layer, 2nd = foreground, 3rd = Normal");
+    println!("                deco toolbar button: 1st click = background layer, further clicks toggle bg/fg");
     println!("  Exit mode   : palette bar paints E/S exit doors and C/R gold/red coins (right-click erases);");
     println!("                click a door to select it, then Set-dest picks its target level (routing auto-syncs)");
+    println!("  Select mode : left-drag marks a tile block, drag from inside it to move (Ctrl-drag copies);");
+    println!("                right-click clears the selection, Delete erases the marked tiles");
     println!("  Esc / Q     : quit (Esc first closes an open level browser)");
 }
 
@@ -2944,5 +3324,98 @@ mod tests {
         // Erasing the door drops its exit entry so the file stays valid.
         assert!(apply_tool(&mut level, Tool::Erase, "level02", x, y, 0.0, 0.0));
         assert!(level.exits.is_empty());
+    }
+
+    #[test]
+    fn selection_from_corners_normalises_and_measures() {
+        let sel = Selection::from_corners((5, 6), (2, 3));
+        assert_eq!(sel.min, (2, 3));
+        assert_eq!(sel.max, (5, 6));
+        assert_eq!((sel.width(), sel.height()), (4, 4));
+        assert!(sel.contains((3, 4)));
+        assert!(sel.contains((2, 3)));
+        assert!(sel.contains((5, 6)));
+        assert!(!sel.contains((6, 6)));
+    }
+
+    #[test]
+    fn clamp_move_target_keeps_the_block_inside_the_grid() {
+        let sel = Selection::at((0, 0), 3, 2); // 3x2 block, grab its top-left
+        // Cursor at (8,9) in a 10x10 grid: a 3x2 block can start at most at (7,8).
+        assert_eq!(clamp_move_target(10, 10, sel, (0, 0), (8, 9)), (7, 8));
+        // Negative reach clamps to the origin.
+        assert_eq!(clamp_move_target(10, 10, sel, (0, 0), (-4, -4)), (0, 0));
+        // A grab offset shifts where the top-left lands.
+        assert_eq!(clamp_move_target(10, 10, sel, (1, 1), (5, 5)), (4, 4));
+    }
+
+    #[test]
+    fn move_selection_relocates_the_block_and_clears_the_source() {
+        let mut level = empty_level();
+        level.tiles[1][1] = tiles::SOLID;
+        level.tiles[1][2] = tiles::DEATH;
+
+        let sel = Selection::at((1, 1), 2, 1);
+        move_selection(&mut level, sel, (5, 5), false, "level02");
+
+        // Source cleared, block stamped at the destination.
+        assert_eq!(level.tiles[1][1], tiles::EMPTY);
+        assert_eq!(level.tiles[1][2], tiles::EMPTY);
+        assert_eq!(level.tiles[5][5], tiles::SOLID);
+        assert_eq!(level.tiles[5][6], tiles::DEATH);
+    }
+
+    #[test]
+    fn move_selection_copy_leaves_the_source_intact() {
+        let mut level = empty_level();
+        level.tiles[2][2] = tiles::SOLID;
+
+        let sel = Selection::at((2, 2), 1, 1);
+        move_selection(&mut level, sel, (4, 4), true, "level02");
+
+        assert_eq!(level.tiles[2][2], tiles::SOLID);
+        assert_eq!(level.tiles[4][4], tiles::SOLID);
+    }
+
+    #[test]
+    fn move_selection_handles_overlapping_source_and_target() {
+        let mut level = empty_level();
+        level.tiles[0][0] = tiles::SOLID;
+        level.tiles[0][1] = tiles::DEATH;
+
+        // Shift a 2x1 block one cell right; the target overlaps the source.
+        let sel = Selection::at((0, 0), 2, 1);
+        move_selection(&mut level, sel, (1, 0), false, "level02");
+
+        assert_eq!(level.tiles[0][0], tiles::EMPTY);
+        assert_eq!(level.tiles[0][1], tiles::SOLID);
+        assert_eq!(level.tiles[0][2], tiles::DEATH);
+    }
+
+    #[test]
+    fn move_selection_reconciles_exits_for_moved_doors() {
+        let mut level = empty_level();
+        // A routed door at (3,3), as apply_tool would leave it.
+        assert!(apply_tool(
+            &mut level,
+            Tool::Tile(tiles::EXIT),
+            "level02",
+            click_at(3, 3).0,
+            click_at(3, 3).1,
+            0.0,
+            0.0
+        ));
+
+        let sel = Selection::at((3, 3), 1, 1);
+        move_selection(&mut level, sel, (6, 6), false, "level09");
+
+        // The exit follows the door to its new cell, re-routed to the default.
+        assert_eq!(
+            level.exits,
+            vec![level::ExitDoor {
+                tile: (6, 6),
+                dest: "level09".to_string()
+            }]
+        );
     }
 }
