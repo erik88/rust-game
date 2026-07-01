@@ -87,6 +87,9 @@ impl GameEngine {
         // If the player is mid-death-animation, advance it and wait for it to finish
         if self.player.is_dead {
             self.player.update_death_animation(delta_time);
+            // The world is frozen during death, but the death-touch sparkle still
+            // needs to animate.
+            self.tilemap.update_death_effects(delta_time);
             if self.player.death_anim_done {
                 match self.on_death {
                     OnDeath::Stop => self.stopped = true,

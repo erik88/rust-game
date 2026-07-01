@@ -48,6 +48,12 @@ const COIN_SHIMMER_SPRITES: [(i32, i32); 2] = [(40, 160), (40, 200)];
 const RED_COIN_SHIMMER_SPRITES: [(i32, i32); 2] = [(200, 200), (200, 240)];
 // The angry-face sprite a death tile shows after it has killed the player.
 const DEATH_HIT_SPRITE: (i32, i32) = (40, 0);
+// The two-frame sparkle flashed at the exact point a death tile was touched. It
+// plays its two sprites in a 1-2-1-2 sequence, each shown DEATH_TOUCH_FRAME
+// seconds, then disappears.
+const DEATH_TOUCH_FRAME: f32 = 0.1;
+const DEATH_TOUCH_SPRITES: [(i32, i32); 2] = [(80, 200), (120, 200)];
+const DEATH_TOUCH_SEQUENCE: [usize; 4] = [0, 1, 0, 1];
 
 #[derive(Clone)]
 pub struct MovingPlatform {
@@ -120,6 +126,33 @@ struct CoinEffect {
     timer: f32,
 }
 
+/// A transient sparkle flashed where the player touched a death tile. Its centre
+/// sits on the tile's border, on the line from the tile centre toward the player
+/// at the moment of contact.
+#[derive(Clone)]
+struct DeathEffect {
+    center: Vec2d, // world-pixel point the 40x40 sprite is centred on
+    timer: f32,
+}
+
+/// The point on a death tile's border where its touch sparkle is centred: the
+/// intersection of the tile's square edge with the line from the tile centre to
+/// `player_center`. Falls back to the tile centre if the player sits exactly on
+/// it.
+fn death_touch_point((tx, ty): (usize, usize), player_center: Vec2d) -> Vec2d {
+    let half = TILE_SIZE / 2.0;
+    let center = Vec2d::new(tx as f32 * TILE_SIZE + half, ty as f32 * TILE_SIZE + half);
+    let dx = player_center.x - center.x;
+    let dy = player_center.y - center.y;
+    // Scale the direction so it just reaches the square's edge (Chebyshev norm).
+    let max = dx.abs().max(dy.abs());
+    if max == 0.0 {
+        return center;
+    }
+    let t = half / max;
+    Vec2d::new(center.x + dx * t, center.y + dy * t)
+}
+
 pub struct TileMap {
     pub width: usize,
     pub height: usize,
@@ -135,6 +168,7 @@ pub struct TileMap {
     coin_timer: f32,                         // Shared clock for the coin shimmer animation
     triggered_death_tiles: HashSet<(usize, usize)>, // Death tiles the player has hit this life
     coin_effects: Vec<CoinEffect>,           // Sparkles playing where coins were collected
+    death_effects: Vec<DeathEffect>,         // Sparkles playing where death tiles were touched
     decorations: Vec<Decoration>,            // Render-only sprites; never affect gameplay
 }
 
@@ -199,6 +233,7 @@ impl TileMap {
             coin_timer: 0.0,
             triggered_death_tiles: HashSet::new(),
             coin_effects: Vec::new(),
+            death_effects: Vec::new(),
             decorations: Vec::new(),
         }
     }
@@ -255,6 +290,7 @@ impl TileMap {
         self.coin_timer = 0.0;
         self.triggered_death_tiles.clear();
         self.coin_effects.clear();
+        self.death_effects.clear();
     }
 
     pub fn tiles_of_type(&self, t: u32) -> Vec<Tile> {
@@ -532,13 +568,34 @@ impl TileMap {
     /// tile was hit.
     pub fn trigger_death_tiles(&mut self, player_bounds: &Rect) -> bool {
         let mut hit = false;
+        let player_center = Vec2d::new(
+            player_bounds.position.x + player_bounds.size.x / 2.0,
+            player_bounds.position.y + player_bounds.size.y / 2.0,
+        );
         for tile in self.tiles_of_type(tiles::DEATH) {
             if player_bounds.intersects(&tile.get_bounding_rect()) {
-                self.triggered_death_tiles.insert((tile.x, tile.y));
+                // Only spawn the touch sparkle the first time this tile is hit.
+                if self.triggered_death_tiles.insert((tile.x, tile.y)) {
+                    self.death_effects.push(DeathEffect {
+                        center: death_touch_point((tile.x, tile.y), player_center),
+                        timer: 0.0,
+                    });
+                }
                 hit = true;
             }
         }
         hit
+    }
+
+    /// Advance the death-touch sparkles and drop them once their animation has
+    /// played out. Called while the player is mid-death, when the rest of the
+    /// tilemap is frozen and [`update`](Self::update) does not run.
+    pub fn update_death_effects(&mut self, delta_time: f32) {
+        let total = DEATH_TOUCH_FRAME * DEATH_TOUCH_SEQUENCE.len() as f32;
+        for effect in &mut self.death_effects {
+            effect.timer += delta_time;
+        }
+        self.death_effects.retain(|effect| effect.timer < total);
     }
 
     /// How many uncollected coins of a given type remain in the level.
@@ -747,9 +804,10 @@ impl TileMap {
     }
 
     /// Draw the foreground decorations, which sit in front of the player, coins
-    /// and moving platforms (hiding whatever passes behind them). Call this after
-    /// the caller has drawn the player, since [`render`](Self::render) only draws
-    /// the background-layer decorations.
+    /// and moving platforms (hiding whatever passes behind them), plus the
+    /// death-touch sparkle, which should flash on top of the dying player. Call
+    /// this after the caller has drawn the player, since [`render`](Self::render)
+    /// only draws the background-layer decorations.
     pub fn render_foreground(
         &self,
         canvas: &mut WindowCanvas,
@@ -758,6 +816,26 @@ impl TileMap {
         camera_y: i32,
     ) {
         self.render_decorations(canvas, texture, camera_x, camera_y, DecoLayer::Foreground);
+
+        // Death-touch sparkles flash their two frames (1-2-1-2) centred on the
+        // point where the player hit the death tile. Drawn last so the effect
+        // appears in front of the player.
+        for effect in &self.death_effects {
+            let step = (effect.timer / DEATH_TOUCH_FRAME) as usize;
+            let Some(&seq) = DEATH_TOUCH_SEQUENCE.get(step) else {
+                continue;
+            };
+            let src_rect = self.sprite_rect(DEATH_TOUCH_SPRITES[seq]);
+            let dst_rect = sdl2::rect::Rect::new(
+                (effect.center.x - TILE_SIZE / 2.0) as i32 - camera_x,
+                (effect.center.y - TILE_SIZE / 2.0) as i32 - camera_y,
+                self.tile_size,
+                self.tile_size,
+            );
+            canvas
+                .copy(texture, Some(src_rect), Some(dst_rect))
+                .unwrap();
+        }
     }
 
     /// Draw every decoration on the given layer at its pixel position.
