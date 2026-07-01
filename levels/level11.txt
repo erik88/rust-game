@@ -1,4 +1,5 @@
 name: Ferrying Blocks
+exit: 15,10 -> level01
 block: 7,3 10,3 10,6 7,6 loop
 block: 5,8 5,11 12,11 12,8 loop
 block: 14,5 18,5

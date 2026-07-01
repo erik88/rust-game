@@ -5,18 +5,23 @@
 //! paint tiles onto the grid. Edits are kept in memory per level and are only
 //! written to disk when you save, so switching levels never loses work.
 //!
-//! The editor has three mutually-exclusive modes, switched with the grouped
+//! The editor has four mutually-exclusive modes, switched with the grouped
 //! toolbar buttons (or the keys noted below): Normal (paint tiles), Path (edit
-//! path blocks) and Deco (place decorations). The bottom tool palette is only
-//! shown in Normal mode.
+//! path blocks), Deco (place decorations) and Exit (route exit doors). The
+//! bottom tool palette holds the world-building tiles in Normal mode and the
+//! exit doors / coins in Exit mode.
+//!
+//! A level browser overlay (the LVLS toolbar button, or Tab) lists every level
+//! by name; click a row to jump to it. The same list is reused in Exit mode to
+//! pick a door's destination.
 //!
 //! Controls:
 //! - Click a mode button in the toolbar (or press F1/F2/F3) to switch modes
-//! - Left mouse   : in Normal mode, apply the selected palette tool to the tile under the cursor
-//! - Right mouse  : in Normal mode, erase the tile under the cursor
+//! - Left mouse   : in Normal / Exit mode, apply the selected palette tool to the tile under the cursor
+//! - Right mouse  : in Normal / Exit mode, erase the tile under the cursor
 //! - (click+drag paints continuously)
-//! - Click the bottom palette bar to choose a tool (Normal mode)
-//! - Click [◀] / [▶] buttons in the toolbar to switch levels
+//! - Click the bottom palette bar to choose a tool (Normal / Exit mode)
+//! - Click the "Lv n/m" button (top-left) to open the level browser and switch levels
 //! - Click resize arrow buttons (top bar right side) to grow/shrink level edges
 //!   Left-click = grow, Right-click = shrink
 //! - Arrow keys (or WASD)      : pan the camera
@@ -65,6 +70,7 @@ use sdl2::pixels::Color;
 use sdl2::rect::Rect;
 use sdl2::render::{Texture, WindowCanvas};
 
+use rustgamex::font;
 use rustgamex::level::{self, DecoLayer, Decoration, Edge, LevelData, PathBlock};
 use rustgamex::player::{PLAYER_HEIGHT, PLAYER_WIDTH, Player};
 use rustgamex::tilemap::TileMap;
@@ -121,9 +127,9 @@ const PICKER_H: i32 = PICKER_ROWS * PICKER_CELL;
 const PICKER_X: i32 = VIEW_WIDTH as i32 - PICKER_W;
 const PICKER_Y: i32 = TILE_AREA_TOP;
 
-// Top-bar button rects (all 44×28, y=4)
-const PREV_BTN: (i32, i32, u32, u32) = (8, BTN_Y, 44, BTN_H);
-const NEXT_BTN: (i32, i32, u32, u32) = (56, BTN_Y, 44, BTN_H);
+// "Levels" button (top-left): shows the current level and opens the level
+// browser overlay, which is the sole way to switch levels with the mouse.
+const LEVELS_BTN: (i32, i32, u32, u32) = (8, BTN_Y, 76, BTN_H);
 // Mode-switch buttons, grouped left-to-right: place normal tiles, edit path
 // blocks, place decorations. Exactly one mode is active at a time.
 const MODE_BTN_W: u32 = 52;
@@ -137,11 +143,71 @@ const RESIZE_TOP_BTN: (i32, i32, u32, u32) = (580, BTN_Y, 36, BTN_H);
 const RESIZE_BOT_BTN: (i32, i32, u32, u32) = (620, BTN_Y, 36, BTN_H);
 const RESIZE_LEFT_BTN: (i32, i32, u32, u32) = (660, BTN_Y, 36, BTN_H);
 const RESIZE_RIGHT_BTN: (i32, i32, u32, u32) = (700, BTN_Y, 36, BTN_H);
+// Fourth mode button: edit exit doors.
+const EXIT_BTN: (i32, i32, u32, u32) = (MODE_BTN_X0 + 3 * MODE_BTN_STEP, BTN_Y, MODE_BTN_W, BTN_H);
 // Play button
 const PLAY_BTN: (i32, i32, u32, u32) = (748, BTN_Y, 44, BTN_H);
 
+// Exit-mode HUD: a small tool palette (exit doors + coins) on the left, then a
+// button that routes the selected door's destination. The palette occupies the
+// first `EXIT_PALETTE_SLOTS` slots from the left margin, so the Set-dest button
+// clears them.
+const EXIT_MENU_BTN_H: i32 = 36;
+const EXIT_PALETTE_SLOTS: i32 = 5;
+const EXIT_DEST_BTN: (i32, i32, u32, u32) = (
+    HUD_MARGIN_X + EXIT_PALETTE_SLOTS * (SLOT + SLOT_PAD) + 12,
+    HUD_TOP + (HUD_HEIGHT - EXIT_MENU_BTN_H) / 2,
+    130,
+    EXIT_MENU_BTN_H as u32,
+);
+
+// Level-browser overlay layout (a centred panel listing every level).
+const OVERLAY_W: i32 = 440;
+const OVERLAY_ROW_H: i32 = 24;
+const OVERLAY_PAD: i32 = 10;
+const OVERLAY_TITLE_H: i32 = 26;
+
 fn to_rect(b: (i32, i32, u32, u32)) -> Rect {
     Rect::new(b.0, b.1, b.2, b.3)
+}
+
+/// Bounding rect of the level-browser overlay panel for `count` levels.
+fn overlay_rect(count: usize) -> Rect {
+    let h = OVERLAY_TITLE_H + count as i32 * OVERLAY_ROW_H + OVERLAY_PAD * 2;
+    let x = (VIEW_WIDTH as i32 - OVERLAY_W) / 2;
+    let avail = HUD_TOP - TILE_AREA_TOP;
+    let y = (TILE_AREA_TOP + (avail - h) / 2).max(TILE_AREA_TOP + 8);
+    Rect::new(x, y, OVERLAY_W as u32, h as u32)
+}
+
+/// Index of the overlay list row under a screen position, if any.
+fn overlay_row_at(count: usize, x: i32, y: i32) -> Option<usize> {
+    let r = overlay_rect(count);
+    if x < r.x() + OVERLAY_PAD || x >= r.x() + r.width() as i32 - OVERLAY_PAD {
+        return None;
+    }
+    let first = r.y() + OVERLAY_TITLE_H + OVERLAY_PAD;
+    for i in 0..count {
+        let ry = first + i as i32 * OVERLAY_ROW_H;
+        if y >= ry && y < ry + OVERLAY_ROW_H {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Whether a screen position falls inside the overlay panel at all.
+fn in_overlay(count: usize, x: i32, y: i32) -> bool {
+    let r = overlay_rect(count);
+    x >= r.x() && x < r.x() + r.width() as i32 && y >= r.y() && y < r.y() + r.height() as i32
+}
+
+/// Whether the cell at `tile` holds an exit door, normal or secret.
+fn is_door(level: &LevelData, tile: (usize, usize)) -> bool {
+    matches!(
+        level.tiles[tile.1][tile.0],
+        tiles::EXIT | tiles::SECRET_EXIT
+    )
 }
 
 fn btn_hit(b: (i32, i32, u32, u32), x: i32, y: i32) -> bool {
@@ -158,6 +224,8 @@ enum Mode {
     Path,
     /// Place render-only decorations.
     Deco,
+    /// Select exit doors and set where each one leads.
+    Exit,
 }
 
 impl Mode {
@@ -166,8 +234,19 @@ impl Mode {
             Mode::Normal => "Normal (tiles)",
             Mode::Path => "Path blocks",
             Mode::Deco => "Decorations",
+            Mode::Exit => "Exit doors",
         }
     }
+}
+
+/// The full-list level overlay, and what a click on one of its rows does.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Overlay {
+    /// Browsing levels: clicking a row switches to that level.
+    Jump,
+    /// Choosing where the selected exit door leads: clicking a row sets its
+    /// destination and closes the overlay.
+    PickDest,
 }
 
 /// A tool the user can paint with.
@@ -252,6 +331,10 @@ enum UICommand {
     CycleBlock,
     /// Toggle the grid overlay.
     ToggleGrid,
+    /// Open the full-list level browser overlay (click a row to jump).
+    OpenLevels,
+    /// Close any open overlay.
+    CloseOverlay,
     /// Scroll the camera back to the level's origin.
     Home,
     /// Save the current level to its file.
@@ -268,10 +351,15 @@ enum UICommand {
 struct Editor {
     docs: Vec<Document>,
     palette: Vec<Tool>,
+    /// Exit-mode tool palette: the exit doors (normal / secret) and the coins
+    /// that gate them, painted from the bottom bar while in [`Mode::Exit`].
+    exit_palette: Vec<Tool>,
     current: usize,
     camera_x: f32,
     camera_y: f32,
     selected: usize,
+    /// Selected slot into [`Editor::exit_palette`] (the Exit-mode tool).
+    exit_tool: usize,
     show_grid: bool,
     pan: Pan,
     mouse: (i32, i32),
@@ -287,6 +375,10 @@ struct Editor {
     /// layer it lands on (while in `Mode::Deco`).
     deco_sprite: u32,
     deco_layer: DecoLayer,
+    /// The exit door currently selected for editing (grid coords), in `Mode::Exit`.
+    selected_door: Option<(usize, usize)>,
+    /// The open full-list level overlay, if any (level browser / destination picker).
+    overlay: Option<Overlay>,
     /// Rendered view of the current level, rebuilt from it whenever `dirty`.
     tilemap: TileMap,
     player: Player,
@@ -302,16 +394,19 @@ struct Editor {
 }
 
 impl Editor {
-    fn new(docs: Vec<Document>, palette: Vec<Tool>) -> Self {
+    fn new(docs: Vec<Document>, palette: Vec<Tool>, exit_palette: Vec<Tool>) -> Self {
         let tilemap = TileMap::from_level(&docs[0].level);
         let player = spawn_player(&docs[0].level);
         Editor {
             docs,
             palette,
+            exit_palette,
             current: 0,
             camera_x: 0.0,
             camera_y: 0.0,
             selected: 2,
+            // Default to the normal exit door (slot 1, after Erase).
+            exit_tool: 1,
             show_grid: true,
             pan: Pan::default(),
             mouse: (0, 0),
@@ -321,6 +416,8 @@ impl Editor {
             start_new: false,
             deco_sprite: 1,
             deco_layer: DecoLayer::Background,
+            selected_door: None,
+            overlay: None,
             tilemap,
             player,
             dirty: false,
@@ -407,6 +504,10 @@ impl Editor {
                 self.dragging = None;
             }
             UICommand::ToggleGrid => self.show_grid = !self.show_grid,
+            UICommand::OpenLevels => {
+                self.overlay = Some(Overlay::Jump);
+            }
+            UICommand::CloseOverlay => self.overlay = None,
             UICommand::Home => {
                 self.camera_x = 0.0;
                 self.camera_y = 0.0;
@@ -430,8 +531,59 @@ impl Editor {
         self.mode = mode;
         self.dragging = None;
         self.start_new = false;
+        // The door selection only makes sense in Exit mode; drop it otherwise.
+        if mode != Mode::Exit {
+            self.selected_door = None;
+        }
         println!("Mode: {}", mode.name());
     }
+
+    /// The level id a newly painted exit door is routed to by default: the next
+    /// level in the list (matching the old linear progression), or this level
+    /// when it is the only one.
+    fn default_exit_dest(&self) -> String {
+        let n = self.docs.len();
+        let next = (self.current + 1) % n;
+        self.docs[next].level.id.clone()
+    }
+
+    /// Handle a click while the level overlay is open: a row either jumps to that
+    /// level or assigns it as the selected door's destination; a click off the
+    /// rows dismisses the overlay.
+    fn overlay_click(&mut self, btn: MouseButton, x: i32, y: i32) {
+        if btn != MouseButton::Left {
+            return;
+        }
+        let Some(overlay) = self.overlay else {
+            return;
+        };
+        let count = self.docs.len();
+        match overlay_row_at(count, x, y) {
+            Some(i) => {
+                match overlay {
+                    Overlay::Jump => self.switch_to = Some(i),
+                    Overlay::PickDest => {
+                        let dest = self.docs[i].level.id.clone();
+                        if let Some(tile) = self.selected_door
+                            && let Some(door) = self.docs[self.current]
+                                .level
+                                .exits
+                                .iter_mut()
+                                .find(|e| e.tile == tile)
+                        {
+                            door.dest = dest;
+                            self.mark_changed();
+                        }
+                    }
+                }
+                self.overlay = None;
+            }
+            // A click anywhere outside the list rows closes the overlay.
+            None if !in_overlay(count, x, y) => self.overlay = None,
+            None => {}
+        }
+    }
+
 
     /// Queue a move by `delta` levels (negative = previous), wrapping around.
     fn switch_level(&mut self, delta: isize) {
@@ -457,6 +609,7 @@ impl Editor {
             self.active_block = None;
             self.dragging = None;
             self.start_new = false;
+            self.selected_door = None;
             self.dirty = true;
             self.retitle = true;
         }
@@ -523,10 +676,14 @@ fn key_command(key: Keycode, ctrl: bool, shift: bool, mode: Mode) -> Option<UICo
         Keycode::F1 => UICommand::SetMode(Mode::Normal),
         Keycode::F2 => UICommand::SetMode(Mode::Path),
         Keycode::F3 => UICommand::FlipDecoLayer,
+        Keycode::F4 => UICommand::SetMode(Mode::Exit),
         Keycode::N if mode == Mode::Path => UICommand::NewBlock,
         Keycode::Tab if mode == Mode::Path => UICommand::CycleBlock,
         Keycode::L if mode == Mode::Path => UICommand::ToggleLoop,
         Keycode::Delete | Keycode::Backspace if mode == Mode::Path => UICommand::DeleteBlock,
+        // Tab opens the level browser everywhere except path mode (where it
+        // cycles blocks).
+        Keycode::Tab => UICommand::OpenLevels,
         _ => return None,
     })
 }
@@ -536,16 +693,16 @@ fn key_command(key: Keycode, ctrl: bool, shift: bool, mode: Mode) -> Option<UICo
 /// shrinks; the other toolbar buttons only respond to the left button.
 fn topbar_command(btn: MouseButton, x: i32, y: i32) -> Option<UICommand> {
     if btn == MouseButton::Left {
-        if btn_hit(PREV_BTN, x, y) {
-            return Some(UICommand::PrevLevel);
-        } else if btn_hit(NEXT_BTN, x, y) {
-            return Some(UICommand::NextLevel);
+        if btn_hit(LEVELS_BTN, x, y) {
+            return Some(UICommand::OpenLevels);
         } else if btn_hit(NORMAL_BTN, x, y) {
             return Some(UICommand::SetMode(Mode::Normal));
         } else if btn_hit(BLOCK_BTN, x, y) {
             return Some(UICommand::ToggleBlockMode);
         } else if btn_hit(DECO_BTN, x, y) {
             return Some(UICommand::CycleDecoMode);
+        } else if btn_hit(EXIT_BTN, x, y) {
+            return Some(UICommand::SetMode(Mode::Exit));
         } else if btn_hit(PLAY_BTN, x, y) {
             return Some(UICommand::Play);
         }
@@ -595,13 +752,25 @@ fn main() -> Result<(), String> {
         return Err("no level files found in levels/".to_string());
     }
 
+    // Normal-mode palette: the world-building tiles. Exit doors and coins live in
+    // the Exit-mode menu (`exit_palette`) instead, since they are edited there
+    // alongside the door routing.
     let palette: Vec<Tool> = std::iter::once(Tool::Erase)
         .chain(std::iter::once(Tool::Spawn))
         // Tile id 2 is unused, so skip it when listing the paintable tiles.
         .chain(std::iter::once(Tool::Tile(tiles::SOLID)))
-        .chain((tiles::DEATH..=tiles::EXIT).map(Tool::Tile))
-        .chain(std::iter::once(Tool::Tile(tiles::COIN)))
+        .chain((tiles::DEATH..=tiles::MOVE_LEFT).map(Tool::Tile))
         .collect();
+
+    // Exit-mode palette: the exit doors (normal / secret) and the coins that gate
+    // them. Painting a door here auto-syncs its `exit:` routing.
+    let exit_palette: Vec<Tool> = vec![
+        Tool::Erase,
+        Tool::Tile(tiles::EXIT),
+        Tool::Tile(tiles::SECRET_EXIT),
+        Tool::Tile(tiles::COIN),
+        Tool::Tile(tiles::RED_COIN),
+    ];
 
     print_controls();
 
@@ -629,7 +798,7 @@ fn main() -> Result<(), String> {
     let mut event_pump = sdl_context.event_pump()?;
     let mut time_provider = RealTime::new();
 
-    let mut editor = Editor::new(docs, palette);
+    let mut editor = Editor::new(docs, palette, exit_palette);
     set_title(
         &mut canvas,
         &editor.docs,
@@ -651,7 +820,10 @@ fn main() -> Result<(), String> {
                 } => {
                     let ctrl = keymod.intersects(Mod::LCTRLMOD | Mod::RCTRLMOD);
                     let shift = keymod.intersects(Mod::LSHIFTMOD | Mod::RSHIFTMOD);
-                    if let Some(cmd) = key_command(key, ctrl, shift, editor.mode) {
+                    if key == Keycode::Escape && editor.overlay.is_some() {
+                        // Esc dismisses an open overlay before it means "quit".
+                        editor.execute(UICommand::CloseOverlay);
+                    } else if let Some(cmd) = key_command(key, ctrl, shift, editor.mode) {
                         editor.execute(cmd);
                     } else {
                         // Keys that aren't commands drive camera panning.
@@ -679,7 +851,9 @@ fn main() -> Result<(), String> {
                     x, y, mousestate, ..
                 } => {
                     editor.mouse = (x, y);
-                    if editor.mode == Mode::Path {
+                    if editor.overlay.is_some() {
+                        // An open overlay captures the view; no painting beneath it.
+                    } else if editor.mode == Mode::Path {
                         if mousestate.left()
                             && drag_path(
                                 &mut editor.docs[editor.current].level,
@@ -723,11 +897,16 @@ fn main() -> Result<(), String> {
                         if changed {
                             editor.mark_changed();
                         }
-                    } else if (TILE_AREA_TOP..HUD_TOP).contains(&y) {
+                    } else if editor.mode == Mode::Normal
+                        && editor.overlay.is_none()
+                        && (TILE_AREA_TOP..HUD_TOP).contains(&y)
+                    {
+                        let dest = editor.default_exit_dest();
                         if mousestate.left() {
                             if apply_tool(
                                 &mut editor.docs[editor.current].level,
                                 editor.palette[editor.selected],
+                                &dest,
                                 x,
                                 y,
                                 editor.camera_x,
@@ -739,6 +918,33 @@ fn main() -> Result<(), String> {
                             && apply_tool(
                                 &mut editor.docs[editor.current].level,
                                 Tool::Erase,
+                                &dest,
+                                x,
+                                y,
+                                editor.camera_x,
+                                editor.camera_y,
+                            )
+                        {
+                            editor.mark_changed();
+                        }
+                    } else if editor.mode == Mode::Exit
+                        && editor.overlay.is_none()
+                        && (TILE_AREA_TOP..HUD_TOP).contains(&y)
+                    {
+                        // Drag to paint a run of coins/doors, mirroring Normal mode.
+                        let dest = editor.default_exit_dest();
+                        let tool = if mousestate.left() {
+                            Some(editor.exit_palette[editor.exit_tool])
+                        } else if mousestate.right() {
+                            Some(Tool::Erase)
+                        } else {
+                            None
+                        };
+                        if let Some(tool) = tool
+                            && apply_tool(
+                                &mut editor.docs[editor.current].level,
+                                tool,
+                                &dest,
                                 x,
                                 y,
                                 editor.camera_x,
@@ -760,13 +966,16 @@ fn main() -> Result<(), String> {
                 Event::MouseButtonDown {
                     mouse_btn, x, y, ..
                 } => {
-                    if y < TOP_BAR_HEIGHT {
+                    if editor.overlay.is_some() {
+                        // While the level overlay is up it captures every click.
+                        editor.overlay_click(mouse_btn, x, y);
+                    } else if y < TOP_BAR_HEIGHT {
                         if let Some(cmd) = topbar_command(mouse_btn, x, y) {
                             editor.execute(cmd);
                         }
                     } else if y >= HUD_TOP {
                         // The HUD bar holds the tool palette in Normal mode and a
-                        // small action menu in Path mode.
+                        // small action menu in Path and Exit modes.
                         match editor.mode {
                             Mode::Normal => {
                                 if mouse_btn == MouseButton::Left
@@ -781,10 +990,57 @@ fn main() -> Result<(), String> {
                                     editor.execute(cmd);
                                 }
                             }
+                            Mode::Exit => {
+                                // The exit bar holds a tool palette (doors + coins)
+                                // on the left; the Set-dest button routes whichever
+                                // door is currently selected.
+                                if mouse_btn == MouseButton::Left {
+                                    if let Some(slot) =
+                                        palette_slot_at(x, editor.exit_palette.len())
+                                    {
+                                        editor.exit_tool = slot;
+                                    } else if editor.selected_door.is_some()
+                                        && btn_hit(EXIT_DEST_BTN, x, y)
+                                    {
+                                        editor.overlay = Some(Overlay::PickDest);
+                                    }
+                                }
+                            }
                             // Deco mode's layer is chosen from the toolbar button,
                             // so its bottom bar stays empty.
                             Mode::Deco => {}
                         }
+                    } else if editor.mode == Mode::Exit {
+                        // Paint the selected exit tool (left) or erase (right); the
+                        // reconcile in apply_tool keeps `exit:` routing in step.
+                        // Whatever door ends up under the cursor is then selected so
+                        // its destination can be set from the bottom bar.
+                        let tool = match mouse_btn {
+                            MouseButton::Left => editor.exit_palette[editor.exit_tool],
+                            MouseButton::Right => Tool::Erase,
+                            _ => continue,
+                        };
+                        let dest = editor.default_exit_dest();
+                        if apply_tool(
+                            &mut editor.docs[editor.current].level,
+                            tool,
+                            &dest,
+                            x,
+                            y,
+                            editor.camera_x,
+                            editor.camera_y,
+                        ) {
+                            editor.mark_changed();
+                        }
+                        let tile = cursor_tile(
+                            &editor.docs[editor.current].level,
+                            x,
+                            y,
+                            editor.camera_x,
+                            editor.camera_y,
+                        );
+                        editor.selected_door =
+                            tile.filter(|&t| is_door(&editor.docs[editor.current].level, t));
                     } else if editor.mode == Mode::Deco {
                         // Clicking the sprite picker selects a sprite; clicking
                         // the level places (left) or erases (right) a decoration.
@@ -845,14 +1101,17 @@ fn main() -> Result<(), String> {
                             editor.mark_changed();
                         }
                     } else {
+                        // Normal mode: paint the selected tool (left) or erase (right).
                         let tool = match mouse_btn {
                             MouseButton::Left => editor.palette[editor.selected],
                             MouseButton::Right => Tool::Erase,
                             _ => continue,
                         };
+                        let dest = editor.default_exit_dest();
                         if apply_tool(
                             &mut editor.docs[editor.current].level,
                             tool,
+                            &dest,
                             x,
                             y,
                             editor.camera_x,
@@ -925,6 +1184,15 @@ fn main() -> Result<(), String> {
             render_cam_y,
         );
         draw_hover(&mut canvas, &editor.tilemap, editor.mouse, camera_xi, render_cam_y);
+        if editor.mode == Mode::Exit {
+            draw_exits(
+                &mut canvas,
+                &editor.docs[editor.current].level,
+                editor.selected_door,
+                camera_xi,
+                render_cam_y,
+            );
+        }
         if editor.mode == Mode::Deco {
             draw_deco_picker(&mut canvas, &tilemap_texture, editor.deco_sprite);
         }
@@ -944,6 +1212,17 @@ fn main() -> Result<(), String> {
                 editor.start_new,
             );
         }
+        if editor.mode == Mode::Exit {
+            draw_exit_menu(
+                &mut canvas,
+                &tilemap_texture,
+                &character_texture,
+                &editor.docs[editor.current].level,
+                &editor.exit_palette,
+                editor.exit_tool,
+                editor.selected_door,
+            );
+        }
         draw_top_bar(
             &mut canvas,
             &editor.docs,
@@ -951,6 +1230,9 @@ fn main() -> Result<(), String> {
             editor.mode,
             editor.deco_layer,
         );
+        if let Some(overlay) = editor.overlay {
+            draw_level_overlay(&mut canvas, &editor.docs, editor.current, overlay);
+        }
 
         canvas.present();
         time_provider.wait_for_next_frame();
@@ -963,10 +1245,13 @@ fn spawn_player(level: &LevelData) -> Player {
     Player::new(level.spawn.0, level.spawn.1)
 }
 
-/// Apply a tool to the tile under a screen position. Returns true if the level changed.
+/// Apply a tool to the tile under a screen position. Returns true if the level
+/// changed. `default_dest` is the level id a freshly painted exit door is routed
+/// to until the user reassigns it in Exit mode.
 fn apply_tool(
     level: &mut LevelData,
     tool: Tool,
+    default_dest: &str,
     screen_x: i32,
     screen_y: i32,
     camera_x: f32,
@@ -1007,7 +1292,26 @@ fn apply_tool(
             );
         }
     }
+    // Every door tile (normal or secret) must have exactly one `exit:` entry and
+    // nothing else may, or the file won't reload. Reconcile the touched cell.
+    reconcile_exit(level, (tx, ty), default_dest);
     true
+}
+
+/// Keep `level.exits` in step with the grid at one cell: add a routed door when
+/// the cell becomes an exit door tile, drop its entry when it stops being one.
+fn reconcile_exit(level: &mut LevelData, tile: (usize, usize), default_dest: &str) {
+    let existing = level.exits.iter().position(|e| e.tile == tile);
+    match (is_door(level, tile), existing) {
+        (true, None) => level.exits.push(level::ExitDoor {
+            tile,
+            dest: default_dest.to_string(),
+        }),
+        (false, Some(i)) => {
+            level.exits.remove(i);
+        }
+        _ => {}
+    }
 }
 
 /// Whether a screen position is over the decoration sprite-picker overlay.
@@ -1404,6 +1708,10 @@ fn toggle_loop(level: &mut LevelData, active_block: Option<usize>) -> bool {
 /// Write the current level to a temporary directory and launch the game binary
 /// pointing at it. The temp dir contains only one level so completing it loops
 /// back to the start rather than advancing. Blocks until the game window closes.
+/// Test-play the level currently being edited: write it to a temp directory on
+/// its own and launch the game there. Its exit doors may point at levels that
+/// aren't in this one-level directory; the game tolerates an unresolvable door
+/// target by simply restarting the level.
 fn launch_game(doc: &Document) {
     let tmp = std::env::temp_dir().join("rustgame_preview");
     if let Err(e) = std::fs::create_dir_all(&tmp) {
@@ -1859,6 +2167,177 @@ fn draw_path_menu(
     }
 }
 
+/// Draw a rectangular button with a centred text label, lit yellow when active.
+fn draw_text_button(canvas: &mut WindowCanvas, b: (i32, i32, u32, u32), label: &str, active: bool) {
+    let r = to_rect(b);
+    canvas.set_draw_color(if active {
+        Color::RGB(80, 75, 40)
+    } else {
+        Color::RGB(50, 50, 65)
+    });
+    let _ = canvas.fill_rect(r);
+    canvas.set_draw_color(if active {
+        Color::RGB(255, 235, 90)
+    } else {
+        Color::RGB(90, 90, 110)
+    });
+    let _ = canvas.draw_rect(r);
+    let tx = b.0 + (b.2 as i32 - font::text_width(label, 1)) / 2;
+    let ty = b.1 + (b.3 as i32 - font::line_height(1)) / 2;
+    let color = if active {
+        Color::RGB(255, 235, 90)
+    } else {
+        Color::RGB(185, 195, 215)
+    };
+    font::draw_text(canvas, tx, ty, label, color, 1);
+}
+
+/// In Exit mode, outline every door and label where it leads. Normal doors are
+/// bracketed cyan, secret doors magenta; the selected door is highlighted
+/// yellow. Clipped to the play area so labels never bleed into the bars.
+fn draw_exits(
+    canvas: &mut WindowCanvas,
+    level: &LevelData,
+    selected: Option<(usize, usize)>,
+    camera_x: i32,
+    camera_y: i32,
+) {
+    let prev_clip = canvas.clip_rect();
+    canvas.set_clip_rect(Rect::new(
+        0,
+        TILE_AREA_TOP,
+        VIEW_WIDTH,
+        (HUD_TOP - TILE_AREA_TOP) as u32,
+    ));
+    let size = TILE_SIZE as i32;
+    for exit in &level.exits {
+        let (tx, ty) = exit.tile;
+        let is_sel = selected == Some(exit.tile);
+        let secret = level.tiles[ty][tx] == tiles::SECRET_EXIT;
+        let x = tx as i32 * size - camera_x;
+        let y = ty as i32 * size - camera_y;
+        let color = if is_sel {
+            Color::RGB(255, 235, 90)
+        } else if secret {
+            Color::RGB(220, 90, 220)
+        } else {
+            Color::RGB(90, 200, 235)
+        };
+        canvas.set_draw_color(color);
+        draw_corner_brackets(canvas, x, y, size);
+
+        // Destination label on a dark plate, just below the door.
+        let label = format!("-> {}", exit.dest);
+        let w = font::text_width(&label, 1);
+        let lx = x + (size - w) / 2;
+        let ly = y + size + 3;
+        canvas.set_draw_color(Color::RGBA(0, 0, 0, 160));
+        let _ = canvas.fill_rect(Rect::new(
+            lx - 2,
+            ly - 1,
+            (w + 4) as u32,
+            (font::line_height(1) + 2) as u32,
+        ));
+        let text_color = if is_sel {
+            Color::RGB(255, 235, 90)
+        } else {
+            Color::RGB(220, 220, 232)
+        };
+        font::draw_text(canvas, lx, ly, &label, text_color, 1);
+    }
+    canvas.set_clip_rect(prev_clip);
+}
+
+/// Draw the Exit-mode HUD: the exit tool palette (doors + coins) on the left, a
+/// Set-destination button for the selected door, and a status line naming the
+/// current target or prompting the user to paint / route a door.
+fn draw_exit_menu(
+    canvas: &mut WindowCanvas,
+    tilemap_texture: &Texture,
+    character_texture: &Texture,
+    level: &LevelData,
+    palette: &[Tool],
+    selected_tool: usize,
+    selected: Option<(usize, usize)>,
+) {
+    draw_palette_slots(
+        canvas,
+        tilemap_texture,
+        character_texture,
+        palette,
+        selected_tool,
+        HUD_MARGIN_X,
+    );
+
+    let secret = selected.is_some_and(|(tx, ty)| level.tiles[ty][tx] == tiles::SECRET_EXIT);
+    let dest = selected
+        .and_then(|t| level.exits.iter().find(|e| e.tile == t))
+        .map(|e| e.dest.as_str());
+
+    draw_text_button(canvas, EXIT_DEST_BTN, "Set dest", selected.is_some());
+
+    let msg = match dest {
+        Some(d) => format!("{} door -> {}", if secret { "secret" } else { "normal" }, d),
+        None => "paint E/S doors & C/R coins; click a door to route it".to_string(),
+    };
+    let x = EXIT_DEST_BTN.0 + EXIT_DEST_BTN.2 as i32 + 16;
+    let y = HUD_TOP + (HUD_HEIGHT - font::line_height(1)) / 2;
+    font::draw_text(canvas, x, y, &msg, Color::RGB(205, 205, 222), 1);
+}
+
+/// Draw the full-list level overlay: a dimmed backdrop and a centred panel with
+/// one clickable row per level (index, name and id). The current level's row is
+/// highlighted. Used both to browse levels and to pick a door's destination.
+fn draw_level_overlay(canvas: &mut WindowCanvas, docs: &[Document], current: usize, overlay: Overlay) {
+    let count = docs.len();
+    let r = overlay_rect(count);
+
+    canvas.set_draw_color(Color::RGBA(0, 0, 0, 150));
+    let _ = canvas.fill_rect(Rect::new(0, 0, VIEW_WIDTH, VIEW_HEIGHT));
+    canvas.set_draw_color(Color::RGB(28, 28, 38));
+    let _ = canvas.fill_rect(r);
+    canvas.set_draw_color(Color::RGB(95, 95, 125));
+    let _ = canvas.draw_rect(r);
+
+    let title = match overlay {
+        Overlay::Jump => "Go to level  (Esc to close)",
+        Overlay::PickDest => "Pick destination  (Esc to cancel)",
+    };
+    font::draw_text(canvas, r.x() + OVERLAY_PAD, r.y() + 8, title, Color::RGB(255, 235, 90), 1);
+    canvas.set_draw_color(Color::RGB(70, 70, 95));
+    let sep_y = r.y() + OVERLAY_TITLE_H - 2;
+    let _ = canvas.draw_line(
+        (r.x() + OVERLAY_PAD, sep_y),
+        (r.x() + r.width() as i32 - OVERLAY_PAD, sep_y),
+    );
+
+    let first = r.y() + OVERLAY_TITLE_H + OVERLAY_PAD;
+    for (i, doc) in docs.iter().enumerate() {
+        let ry = first + i as i32 * OVERLAY_ROW_H;
+        if i == current {
+            canvas.set_draw_color(Color::RGB(58, 58, 40));
+            let _ = canvas.fill_rect(Rect::new(
+                r.x() + OVERLAY_PAD,
+                ry,
+                r.width() - (2 * OVERLAY_PAD) as u32,
+                (OVERLAY_ROW_H - 2) as u32,
+            ));
+        }
+        let name = if doc.level.name.is_empty() {
+            doc.level.id.as_str()
+        } else {
+            doc.level.name.as_str()
+        };
+        let label = format!("{:>2}  {}  [{}]", i + 1, name, doc.level.id);
+        let color = if i == current {
+            Color::RGB(255, 235, 90)
+        } else {
+            Color::RGB(222, 222, 234)
+        };
+        font::draw_text(canvas, r.x() + OVERLAY_PAD + 4, ry + 4, &label, color, 1);
+    }
+}
+
 fn draw_hud(
     canvas: &mut WindowCanvas,
     tilemap_texture: &Texture,
@@ -1873,15 +2352,34 @@ fn draw_hud(
     let _ = canvas.draw_line((0, HUD_TOP), (VIEW_WIDTH as i32, HUD_TOP));
 
     // The tool palette is only relevant when painting normal tiles; the other
-    // modes have their own selectors (the path overlay / the sprite picker), so
-    // the bar is left empty for them.
+    // modes have their own selectors (the path overlay / the sprite picker / the
+    // Exit-mode menu), so the bar is left empty for them.
     if mode != Mode::Normal {
         return;
     }
+    draw_palette_slots(
+        canvas,
+        tilemap_texture,
+        character_texture,
+        palette,
+        selected,
+        HUD_MARGIN_X,
+    );
+}
 
+/// Draw one palette bar's worth of tool slots starting at `x0`, highlighting the
+/// selected one. Shared by the Normal-mode palette and the Exit-mode menu.
+fn draw_palette_slots(
+    canvas: &mut WindowCanvas,
+    tilemap_texture: &Texture,
+    character_texture: &Texture,
+    palette: &[Tool],
+    selected: usize,
+    x0: i32,
+) {
     let slot_y = HUD_TOP + (HUD_HEIGHT - SLOT) / 2;
     for (i, tool) in palette.iter().enumerate() {
-        let slot_x = HUD_MARGIN_X + i as i32 * (SLOT + SLOT_PAD);
+        let slot_x = x0 + i as i32 * (SLOT + SLOT_PAD);
         let dst = Rect::new(slot_x, slot_y, SLOT as u32, SLOT as u32);
 
         canvas.set_draw_color(Color::RGB(55, 55, 70));
@@ -1944,9 +2442,9 @@ fn draw_top_bar(
     canvas.set_draw_color(Color::RGB(80, 80, 100));
     let _ = canvas.draw_line((0, TOP_BAR_HEIGHT - 1), (VIEW_WIDTH as i32, TOP_BAR_HEIGHT - 1));
 
-    // --- Prev / Next buttons ---
-    draw_nav_button(canvas, PREV_BTN, ArrowDir::Left);
-    draw_nav_button(canvas, NEXT_BTN, ArrowDir::Right);
+    // --- Levels button (shows the current level; opens the browser) ---
+    let level_label = format!("Lv {}/{}", current + 1, docs.len());
+    draw_text_button(canvas, LEVELS_BTN, &level_label, false);
 
     // --- Mode-switch buttons (exactly one active) ---
     draw_normal_button(canvas, NORMAL_BTN, mode == Mode::Normal);
@@ -1958,23 +2456,8 @@ fn draw_top_bar(
         DECO_BTN,
         (mode == Mode::Deco).then_some(deco_layer),
     );
-
-    // Level indicator dots between the nav buttons
-    let n = docs.len();
-    let dot_r = 3i32;
-    let dot_spacing = 10i32;
-    let dots_w = (n as i32 - 1) * dot_spacing;
-    let dots_cx = (PREV_BTN.0 + PREV_BTN.2 as i32 + NEXT_BTN.0) / 2;
-    let dots_y = BTN_Y + BTN_H as i32 / 2;
-    for i in 0..n {
-        let cx = dots_cx - dots_w / 2 + i as i32 * dot_spacing;
-        if i == current {
-            canvas.set_draw_color(Color::RGB(255, 235, 90));
-        } else {
-            canvas.set_draw_color(Color::RGB(90, 90, 110));
-        }
-        fill_circle(canvas, cx, dots_y, dot_r);
-    }
+    // Exit-door mode button.
+    draw_text_button(canvas, EXIT_BTN, "EXIT", mode == Mode::Exit);
 
     // --- Separator before resize ---
     canvas.set_draw_color(Color::RGB(80, 80, 100));
@@ -2006,16 +2489,6 @@ enum ArrowDir {
     Right,
     Up,
     Down,
-}
-
-/// Draw a Prev/Next navigation button.
-fn draw_nav_button(canvas: &mut WindowCanvas, b: (i32, i32, u32, u32), dir: ArrowDir) {
-    let r = to_rect(b);
-    canvas.set_draw_color(Color::RGB(50, 50, 65));
-    let _ = canvas.fill_rect(r);
-    canvas.set_draw_color(Color::RGB(90, 90, 110));
-    let _ = canvas.draw_rect(r);
-    draw_arrow_shape(canvas, b, dir, Color::RGB(200, 200, 220));
 }
 
 /// Draw a resize button (grow on left-click, shrink on right-click).
@@ -2254,19 +2727,22 @@ fn print_controls() {
     println!("Level Editor controls:");
     println!("  Left mouse  : paint selected tool      Right mouse : erase");
     println!("  Click palette bar to pick a tool       , / . (PgUp/PgDn): prev/next level");
-    println!("  Toolbar [◀]/[▶] buttons : prev/next level");
     println!("  Toolbar resize arrows   : left-click=grow edge, right-click=shrink edge");
     println!("  Arrows / WASD: pan camera              Home        : scroll to start");
     println!("  Ctrl+Arrow  : grow canvas at that edge Ctrl+Shift+Arrow: shrink that edge");
     println!("  G           : toggle grid              Ctrl+S      : save level");
-    println!("  Modes (toolbar buttons): Normal tiles | B path blocks | X decorations");
+    println!("  Modes (toolbar/keys): F1 Normal tiles | F2 path blocks | F3 decorations | F4 exit doors");
+    println!("  Levels      : the 'Lv n/m' button or Tab opens the level browser; click a level to jump");
     println!("  Normal mode : click palette bar to pick a tool, left-click paints, right-click erases");
+    println!("                (world tiles only; exit doors and coins moved to Exit mode)");
     println!("  Path mode   : left-click adds points / drags points & edges, right-click deletes");
     println!("                N new block, L open/close loop, Tab cycle, Del remove block");
     println!("                (bottom bar shows New-block and Toggle-loop buttons)");
     println!("  Deco mode   : click picker to choose a sprite, left-click places, right-click erases");
     println!("                deco toolbar button: 1st click = background layer, 2nd = foreground, 3rd = Normal");
-    println!("  Esc / Q     : quit");
+    println!("  Exit mode   : palette bar paints E/S exit doors and C/R gold/red coins (right-click erases);");
+    println!("                click a door to select it, then Set-dest picks its target level (routing auto-syncs)");
+    println!("  Esc / Q     : quit (Esc first closes an open level browser)");
 }
 
 #[cfg(test)]
@@ -2430,5 +2906,43 @@ mod tests {
         ));
         assert_eq!(active, Some(0));
         assert_eq!(drag, Some(Drag::Segment(0)));
+    }
+
+    #[test]
+    fn painting_a_door_syncs_a_routed_exit_and_erasing_removes_it() {
+        let mut level = empty_level();
+        let (x, y) = click_at(3, 3);
+
+        // Painting a normal exit door creates its routed exit entry.
+        assert!(apply_tool(
+            &mut level,
+            Tool::Tile(tiles::EXIT),
+            "level02",
+            x,
+            y,
+            0.0,
+            0.0
+        ));
+        assert_eq!(
+            level.exits,
+            vec![level::ExitDoor { tile: (3, 3), dest: "level02".to_string() }]
+        );
+
+        // Converting it to a secret door keeps the single exit entry.
+        assert!(apply_tool(
+            &mut level,
+            Tool::Tile(tiles::SECRET_EXIT),
+            "level02",
+            x,
+            y,
+            0.0,
+            0.0
+        ));
+        assert_eq!(level.tiles[3][3], tiles::SECRET_EXIT);
+        assert_eq!(level.exits.len(), 1);
+
+        // Erasing the door drops its exit entry so the file stays valid.
+        assert!(apply_tool(&mut level, Tool::Erase, "level02", x, y, 0.0, 0.0));
+        assert!(level.exits.is_empty());
     }
 }

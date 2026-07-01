@@ -90,8 +90,8 @@ impl TestRunner {
 
         // Load textures - we need to leak them to get 'static lifetime
         // This is okay for tests since they're short-lived
-        let character_texture =
-            load_png_texture(&texture_creator, "character.png").expect("Failed to load character.png");
+        let character_texture = load_png_texture(&texture_creator, "character.png")
+            .expect("Failed to load character.png");
         let tilemap_texture =
             load_png_texture(&texture_creator, "tilemap.png").expect("Failed to load tilemap.png");
 
@@ -424,10 +424,10 @@ mod tests {
     fn test_completing_level_advances_to_next() {
         use rustgamex::level::LevelData;
 
-        // Level 1: spawn two tiles left of the exit door
-        let level1 = LevelData::parse("P.E\n111").unwrap();
+        // Level 1: spawn two tiles left of the exit door, which leads to level 2
+        let level1 = LevelData::parse("id: one\nexit: 2,0 -> two\n\nP.E\n111").unwrap();
         // Level 2: distinct layout, spawn on the second row
-        let level2 = LevelData::parse("....\n.P..\n1111").unwrap();
+        let level2 = LevelData::parse("id: two\n\n....\n.P..\n1111").unwrap();
         let mut engine = GameEngine::from_levels(vec![level1, level2], OnDeath::Stop).unwrap();
 
         let dt = 1.0 / 60.0;
@@ -481,7 +481,7 @@ mod tests {
 
         // An open door (no coins) floating at the top, ground far below. The
         // single column means the door, the player and the floor share x.
-        let level = LevelData::parse("E\n.\n.\n.\nP\n1").unwrap();
+        let level = LevelData::parse("exit: 0,0 -> self\n\nE\n.\n.\n.\nP\n1").unwrap();
         let mut engine = GameEngine::from_levels(vec![level], OnDeath::Stop).unwrap();
         assert!(
             engine.tilemap().doors_open(),
@@ -521,7 +521,7 @@ mod tests {
         use rustgamex::tiles::TILE_SIZE;
 
         // Spawn one tile left of the exit door, on flat ground.
-        let level = LevelData::parse("P.E\n111").unwrap();
+        let level = LevelData::parse("exit: 2,0 -> self\n\nP.E\n111").unwrap();
         let mut engine = GameEngine::from_levels(vec![level], OnDeath::Stop).unwrap();
 
         let dt = 1.0 / 60.0;
@@ -605,7 +605,8 @@ mod tests {
 
         // Spawn, then a closed exit, then a coin further right, all on flat
         // ground wide enough that the player never falls off.
-        let level = LevelData::parse("P.E....C......\n11111111111111").unwrap();
+        let level =
+            LevelData::parse("exit: 2,0 -> self\n\nP.E....C......\n11111111111111").unwrap();
         let mut engine = GameEngine::from_levels(vec![level], OnDeath::Stop).unwrap();
         let dt = 1.0 / 60.0;
 
@@ -679,6 +680,32 @@ mod tests {
             "Expected at least 2 level files, found {}",
             count
         );
+    }
+
+    #[test]
+    fn test_shipped_levels_load_with_every_door_resolving() {
+        // The shipped set must be internally consistent: every exit door points
+        // at a level that exists in it. (load_dir only warns on a dangling
+        // destination so a single level can be test-played in isolation, so this
+        // test asserts the stronger guarantee directly for the shipped levels.)
+        let levels = rustgamex::level::load_dir("levels")
+            .unwrap_or_else(|e| panic!("shipped levels failed to load: {}", e));
+        assert!(
+            levels.iter().all(|l| !l.id.is_empty()),
+            "every level has an id"
+        );
+        let ids: std::collections::HashSet<&str> =
+            levels.iter().map(|l| l.id.as_str()).collect();
+        for level in &levels {
+            for door in &level.exits {
+                assert!(
+                    ids.contains(door.dest.as_str()),
+                    "{} routes a door to missing level '{}'",
+                    level.id,
+                    door.dest
+                );
+            }
+        }
     }
 
     #[test]
@@ -1208,6 +1235,7 @@ mod tests {
         // the block's start so he falls onto it and is carried to the right.
         let grid = vec![vec![0u32; 12]; 12];
         let level = LevelData {
+            id: String::new(),
             name: String::new(),
             spawn: (44.0, 150.0),
             tiles: grid,
@@ -1216,6 +1244,7 @@ mod tests {
                 closed: false,
             }],
             decorations: Vec::new(),
+            exits: Vec::new(),
         };
 
         let mut runner = TestRunner::new_with(

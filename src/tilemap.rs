@@ -1,6 +1,6 @@
 use crate::geometry::rect::Rect;
 use crate::geometry::vec2d::Vec2d;
-use crate::level::{Decoration, DecoLayer, LevelData};
+use crate::level::{DecoLayer, Decoration, LevelData};
 use crate::tiles::{self, TILE_SIZE};
 use sdl2::render::{Texture, WindowCanvas};
 use std::collections::{HashMap, HashSet};
@@ -44,6 +44,8 @@ const COIN_COLLECT_SPRITES: [(i32, i32); 2] = [(80, 160), (120, 160)];
 //
 // The two extra coin sprites shown during the idle shimmer.
 const COIN_SHIMMER_SPRITES: [(i32, i32); 2] = [(40, 160), (40, 200)];
+// The red coin's two idle-shimmer sprites (its base is at tiles::RED_COIN).
+const RED_COIN_SHIMMER_SPRITES: [(i32, i32); 2] = [(200, 200), (200, 240)];
 // The angry-face sprite a death tile shows after it has killed the player.
 const DEATH_HIT_SPRITE: (i32, i32) = (40, 0);
 
@@ -504,20 +506,22 @@ impl TileMap {
         self.disappearing_tiles.entry((x, y)).or_insert(remaining);
     }
 
-    /// Remove every coin the player's bounding box overlaps. Returns the number
-    /// collected this frame.
+    /// Remove every coin the player's bounding box overlaps - gold and red alike,
+    /// each opening its own door type. Returns the number collected this frame.
     pub fn collect_coins(&mut self, player_bounds: &Rect) -> u32 {
         let mut collected = 0;
         let inset = (TILE_SIZE - COIN_DIAMETER) / 2.0;
-        for tile in self.tiles_of_type(tiles::COIN) {
-            if player_bounds.intersects(&tile.get_bounding_rect().shrink(inset)) {
-                self.tiles[tile.y][tile.x] = tiles::EMPTY;
-                self.coin_effects.push(CoinEffect {
-                    tile_x: tile.x,
-                    tile_y: tile.y,
-                    timer: 0.0,
-                });
-                collected += 1;
+        for coin_type in [tiles::COIN, tiles::RED_COIN] {
+            for tile in self.tiles_of_type(coin_type) {
+                if player_bounds.intersects(&tile.get_bounding_rect().shrink(inset)) {
+                    self.tiles[tile.y][tile.x] = tiles::EMPTY;
+                    self.coin_effects.push(CoinEffect {
+                        tile_x: tile.x,
+                        tile_y: tile.y,
+                        timer: 0.0,
+                    });
+                    collected += 1;
+                }
             }
         }
         collected
@@ -537,18 +541,29 @@ impl TileMap {
         hit
     }
 
-    /// How many uncollected coins remain in the level.
-    pub fn coins_remaining(&self) -> usize {
-        self.tiles
-            .iter()
-            .flatten()
-            .filter(|&&t| t == tiles::COIN)
-            .count()
+    /// How many uncollected coins of a given type remain in the level.
+    fn count_tiles(&self, tile: u32) -> usize {
+        self.tiles.iter().flatten().filter(|&&t| t == tile).count()
     }
 
-    /// Exit doors stay shut until every coin has been collected.
+    /// How many uncollected gold coins remain in the level.
+    pub fn coins_remaining(&self) -> usize {
+        self.count_tiles(tiles::COIN)
+    }
+
+    /// How many uncollected red coins remain in the level.
+    pub fn red_coins_remaining(&self) -> usize {
+        self.count_tiles(tiles::RED_COIN)
+    }
+
+    /// Normal exit doors stay shut until every gold coin has been collected.
     pub fn doors_open(&self) -> bool {
         self.coins_remaining() == 0
+    }
+
+    /// Secret exit doors stay shut until every red coin has been collected.
+    pub fn secret_doors_open(&self) -> bool {
+        self.red_coins_remaining() == 0
     }
 
     pub fn is_solid(&self, tile_x: i32, tile_y: i32) -> bool {
@@ -585,6 +600,18 @@ impl TileMap {
         }
     }
 
+    /// Pixel coordinate of the red coin sprite to draw this frame, mirroring the
+    /// gold [`coin_sprite`](Self::coin_sprite) idle shimmer on the same clock.
+    fn red_coin_sprite(&self) -> (i32, i32) {
+        if self.coin_timer < COIN_ANIM_FRAME {
+            RED_COIN_SHIMMER_SPRITES[0]
+        } else if self.coin_timer < COIN_ANIM_FRAME * 2.0 {
+            RED_COIN_SHIMMER_SPRITES[1]
+        } else {
+            tiles::tile_src_xy(tiles::RED_COIN)
+        }
+    }
+
     /// Pixel coordinate of a destroying platform's sprite for the given decay
     /// frame (0 = just collided, 1 = final stretch before removal).
     fn platform_destroy_sprite(tile_type: u32, frame: usize) -> (i32, i32) {
@@ -613,8 +640,10 @@ impl TileMap {
         let end_col =
             ((camera_x + 800) / self.tile_size as i32 + 1).min(self.width as i32) as usize;
 
-        // Once all coins are collected, closed exit doors show the open sprite
+        // Once all coins of a kind are collected, that door type shows its open
+        // sprite: gold coins open the normal doors, red coins the secret ones.
         let doors_open = self.doors_open();
+        let secret_doors_open = self.secret_doors_open();
 
         for row in 0..self.height {
             for col in start_col..end_col {
@@ -623,10 +652,13 @@ impl TileMap {
                     continue;
                 }
 
-                // The grid only ever stores EXIT; swap in the open sprite for
-                // rendering when the door is open.
+                // The grid stores the closed door tiles; swap in the matching
+                // open sprite for rendering once that door type's coins are gone.
+                // Normal doors track the gold coins, secret doors the red ones.
                 let sprite_id = if tile_id == tiles::EXIT && doors_open {
                     tiles::EXIT_OPEN
+                } else if tile_id == tiles::SECRET_EXIT && secret_doors_open {
+                    tiles::SECRET_EXIT_OPEN
                 } else {
                     tile_id
                 };
@@ -643,6 +675,8 @@ impl TileMap {
                 // angry-face sprite until the level resets on respawn.
                 let sprite = if sprite_id == tiles::COIN {
                     self.coin_sprite()
+                } else if sprite_id == tiles::RED_COIN {
+                    self.red_coin_sprite()
                 } else if sprite_id == tiles::DEATH
                     && self.triggered_death_tiles.contains(&(col, row))
                 {
@@ -677,7 +711,11 @@ impl TileMap {
             // final stretch, telegraphing its imminent removal.
             let sprite = match platform.destroy_timer {
                 Some(timer) => {
-                    let frame = if timer <= PLATFORM_DESTROY_DELAY / 2.0 { 1 } else { 0 };
+                    let frame = if timer <= PLATFORM_DESTROY_DELAY / 2.0 {
+                        1
+                    } else {
+                        0
+                    };
                     Self::platform_destroy_sprite(platform.tile_type, frame)
                 }
                 None => tiles::tile_src_xy(platform.tile_type),
@@ -702,7 +740,9 @@ impl TileMap {
                 self.tile_size,
                 self.tile_size,
             );
-            canvas.copy(texture, Some(src_rect), Some(dst_rect)).unwrap();
+            canvas
+                .copy(texture, Some(src_rect), Some(dst_rect))
+                .unwrap();
         }
     }
 
@@ -760,7 +800,11 @@ mod tests {
         // Horizontal open path from tile (1,1) to (3,1): 80px (0.8s) one way.
         let level = LevelData::parse("block: 1,1 3,1\n\nP.\n11").unwrap();
         let mut map = TileMap::from_level(&level);
-        assert_eq!(block_pos(&map), (TILE_SIZE, TILE_SIZE), "starts on first point");
+        assert_eq!(
+            block_pos(&map),
+            (TILE_SIZE, TILE_SIZE),
+            "starts on first point"
+        );
 
         map.update(0.5); // 50px toward the far end
         assert!((block_pos(&map).0 - (TILE_SIZE + 50.0)).abs() < 0.01);

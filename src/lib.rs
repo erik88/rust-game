@@ -1,4 +1,5 @@
 pub mod engine;
+pub mod font;
 pub mod geometry;
 pub mod input;
 pub mod level;

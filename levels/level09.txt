@@ -1,4 +1,5 @@
 name: Block Cowboy
+exit: 47,2 -> level10
 deco: 1520,320 8
 deco: 1560,400 8
 deco: 1600,480 8

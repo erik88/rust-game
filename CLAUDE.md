@@ -19,15 +19,24 @@ There are six tiles per row, so tile 7 is located at (0,40);
 | 10          | A moving tile. Goes right.                                   |
 | 11          | A moving tile. Goes down.                                    |
 | 12          | A moving tile. Goes left.                                    |
-| 13          | An exit tile (door), CLOSED. Not solid. Opens once all coins are collected; touching it while open completes the level. |
-| 14          | A coin. Not solid. Collected on touch. All coins must be collected before exit doors open. |
+| 13          | An exit tile (door), CLOSED. Not solid. Opens once all GOLD coins are collected; touching it while open completes the level. |
+| 14          | A gold coin. Not solid. Collected on touch. All gold coins must be collected before the normal exit doors open. |
 | 15          | A path block. Render-only sprite for the moving blocks declared with `block:` headers; never stored in the tile grid. |
-| 19          | An exit tile (door), OPEN. Render-only sprite shown for tile 13 once all coins are collected; never stored in a level file. |
+| 16          | A secret exit tile (door), CLOSED. Like tile 13, but opens once all RED coins are collected. Sprite at (0,200), just below the normal door. |
+| 17          | A red coin. Not solid. Collected on touch. All red coins must be collected before the secret exit doors open. Sprite at (200,160). |
+| 19          | An exit tile (door), OPEN. Render-only sprite shown for tile 13 once all gold coins are collected; never stored in a level file. |
+| 20          | A secret exit tile (door), OPEN. Render-only sprite shown for tile 16 once all red coins are collected; never stored in a level file. Sprite at (0,240). |
 
-## Coins and the exit
-- Place coins with the `C` character in level files (tile 14).
-- While any coin remains, exit doors (tile 13) render with the CLOSED sprite and touching them does nothing.
-- Once every coin is collected, doors render with the OPEN sprite (tile 19) and touching one completes the level.
+## Coins and the exits
+There are two independent coin/door currencies:
+- **Gold coins** (`C`, tile 14) gate the **normal** exit doors (`E`, tile 13).
+- **Red coins** (`R`, tile 17) gate the **secret** exit doors (`S`, tile 16).
+
+For each kind: while any of its coins remain, that door type renders with its
+CLOSED sprite and touching it does nothing. Once every coin of that kind is
+collected, its doors render with the OPEN sprite (tile 19 / 20) and touching one
+completes the level. A level with no red coins leaves its secret doors open from
+the start (and likewise for gold coins and normal doors).
 
 ## Moving tiles
 - Solid, the player cannot be inside them.
@@ -74,9 +83,18 @@ Levels are ASCII text files in the "levels/" directory, loaded in filename
 order. The format is documented in `src/level.rs`: an optional `key: value`
 header (e.g. `name: My Level`), a blank line, then the tile grid using
 characters `.` (empty), `1`-`8` (tile types), `^` `>` `v` `<` (moving tiles
-9-12), `E` (exit, 13) and `P` (player spawn). Touching an exit tile completes
-the level; after a short transition pause the next level is loaded (looping
-back to the first level after the last).
+9-12), `E` (normal exit, 13), `S` (secret exit, 16), `C` (gold coin, 14),
+`R` (red coin, 17) and `P` (player spawn). Touching an open exit tile completes
+the level; after a short transition pause the level its door points at is loaded.
+
+Levels are linked explicitly by id, not by filename order. An `id:` header names
+a level (defaulting to the file stem, e.g. `level01`, when omitted), and **every
+door tile (`E` or `S`) must be routed by an `exit:` header line** — there is no
+implicit "next level". An `exit:` line gives the door's `x,y` tile position,
+`->`, and the destination level id, e.g. `exit: 8,9 -> level02`. Whether a door
+is secret (drawn with the secret sprite, gated on red coins) is determined by
+its grid tile (`E` vs `S`), not by the exit line. Destinations are checked at
+load time, so a door that points at a missing level is a hard error.
 
 Path blocks are declared with one `block:` header line each, listing ordered
 `x,y` control points and an optional trailing `loop`, e.g.

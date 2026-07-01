@@ -34,9 +34,21 @@ pub const COIN: u32 = 14;
 /// `block:` header, never stored in the tile grid, so this id exists purely to
 /// select their sprite.
 pub const PATH_BLOCK: u32 = 15;
+/// Secret exit door, closed phase. Like [`EXIT`], but gated on the red coins
+/// ([`RED_COIN`]) rather than the gold ones: it only opens (and is drawn with
+/// the [`SECRET_EXIT_OPEN`] sprite) once every red coin has been collected.
+/// Placed with the `S` character.
+pub const SECRET_EXIT: u32 = 16;
+/// A red collectible coin. Every red coin must be collected before the level's
+/// secret exit doors open, independently of the gold [`COIN`]s. Placed with the
+/// `R` character.
+pub const RED_COIN: u32 = 17;
 /// Exit door, open phase. This is purely a render substitution for an [`EXIT`]
 /// tile once all coins are gone; it never appears in the tile grid itself.
 pub const EXIT_OPEN: u32 = 19;
+/// Secret exit door, open phase. Render substitution for a [`SECRET_EXIT`] tile
+/// once all red coins are gone; never stored in the tile grid itself.
+pub const SECRET_EXIT_OPEN: u32 = 20;
 
 /// Number of 40px sprites per row in tilemap.png.
 pub const SHEET_COLUMNS: u32 = 6;
@@ -73,13 +85,19 @@ pub fn tile_src_xy(tile_id: u32) -> (i32, i32) {
         COIN => (40, 120),
         PATH_BLOCK => (0, 80),
         EXIT_OPEN => (0, 160),
+        SECRET_EXIT => (0, 200),
+        SECRET_EXIT_OPEN => (0, 240),
+        RED_COIN => (200, 160),
         _ => (0, 0),
     }
 }
 
 /// Whether the player and moving platforms collide with this tile type
 pub fn is_solid(tile_type: u32) -> bool {
-    !matches!(tile_type, EMPTY | DEATH | PERIODIC_GHOST | EXIT | COIN)
+    !matches!(
+        tile_type,
+        EMPTY | DEATH | PERIODIC_GHOST | EXIT | COIN | SECRET_EXIT | RED_COIN
+    )
 }
 
 /// Whether this tile type is extracted from the grid as a moving platform

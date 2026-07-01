@@ -4,13 +4,26 @@
 //! a blank line, and then the tile grid. Example:
 //!
 //! ```text
+//! id: first-steps
 //! name: First Steps
+//! exit: 7,1 -> second-steps
 //! block: 1,1 4,1 4,3 1,3 loop
 //!
 //! ..........
 //! .P.....E..
 //! 1111111111
 //! ```
+//!
+//! An `id:` header names the level so other levels' exits can point at it; when
+//! omitted it defaults to the file's stem (e.g. `level01`). Levels are linked
+//! purely by these ids - there is no implicit "next level in filename order".
+//!
+//! Every door tile - a normal `E` and a secret `S` alike - must be routed by
+//! exactly one `exit:` header line, giving the door's `x,y` tile position, `->`,
+//! and the destination level id. The destination must name a level that exists
+//! in the loaded set. A secret `S` door differs only in gameplay: it is drawn
+//! with the secret-door sprite and opens once every *red* coin (`R`) is
+//! collected, rather than every gold coin (`C`).
 //!
 //! A `block:` header defines a platform that moves along a path of control
 //! points (`x,y` tile coordinates). Consecutive points must be strictly
@@ -43,8 +56,10 @@
 //! | `>`     | 10 - moving tile, goes right          |
 //! | `v`     | 11 - moving tile, goes down           |
 //! | `<`     | 12 - moving tile, goes left           |
-//! | `E`     | 13 - exit tile                        |
-//! | `C`     | 14 - coin (collect all to open exits) |
+//! | `E`     | 13 - exit tile (open once all coins collected)  |
+//! | `C`     | 14 - coin (collect all to open normal exits)    |
+//! | `S`     | 16 - secret exit tile (opens once all red coins collected) |
+//! | `R`     | 17 - red coin (collect all to open secret exits) |
 //! | `P`     | player spawn point (empty space)      |
 
 use crate::player::{PLAYER_HEIGHT, PLAYER_WIDTH};
@@ -93,9 +108,25 @@ pub struct Decoration {
     pub layer: DecoLayer,
 }
 
+/// One exit door and the level it leads to. Every door tile in the grid - a
+/// normal `E` ([`tiles::EXIT`]) or a secret `S` ([`tiles::SECRET_EXIT`]) - must
+/// have a matching `exit:` header line; there is no implicit "next level in
+/// order". Whether a door is secret (gated on red coins, drawn with the secret
+/// sprite) is determined by its tile type, not by the exit line.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExitDoor {
+    /// Grid coordinates of the door tile this line routes.
+    pub tile: (usize, usize),
+    /// `id` of the level this door leads to.
+    pub dest: String,
+}
+
 /// Parsed level, independent of how it was stored on disk.
 #[derive(Clone, Debug)]
 pub struct LevelData {
+    /// Stable identifier other levels' exits point at. Defaults to the file's
+    /// stem (set by [`load_dir_entries`]) when no `id:` header is given.
+    pub id: String,
     pub name: String,
     /// Player spawn position in pixels (top-left corner of the player).
     pub spawn: (f32, f32),
@@ -104,13 +135,17 @@ pub struct LevelData {
     pub path_blocks: Vec<PathBlock>,
     /// Render-only decorative sprites defined by `deco:` header lines.
     pub decorations: Vec<Decoration>,
+    /// Where each exit door leads, one per `E` tile, set by `exit:` header lines.
+    pub exits: Vec<ExitDoor>,
 }
 
 impl LevelData {
     pub fn parse(text: &str) -> Result<LevelData, String> {
+        let mut id = String::new();
         let mut name = String::new();
         let mut path_blocks: Vec<PathBlock> = Vec::new();
         let mut decorations: Vec<Decoration> = Vec::new();
+        let mut exits: Vec<ExitDoor> = Vec::new();
         let mut grid_lines: Vec<&str> = Vec::new();
         let mut in_grid = false;
 
@@ -122,7 +157,9 @@ impl LevelData {
                 }
                 if let Some((key, value)) = trimmed.split_once(':') {
                     match key.trim() {
+                        "id" => id = value.trim().to_string(),
                         "name" => name = value.trim().to_string(),
+                        "exit" => exits.push(parse_exit(value.trim())?),
                         "block" => path_blocks.push(parse_path_block(value.trim())?),
                         "deco" => {
                             decorations.push(parse_decoration(value.trim(), DecoLayer::Background)?)
@@ -163,7 +200,9 @@ impl LevelData {
                     'v' => tiles::MOVE_DOWN,
                     '<' => tiles::MOVE_LEFT,
                     'E' => tiles::EXIT,
+                    'S' => tiles::SECRET_EXIT,
                     'C' => tiles::COIN,
+                    'R' => tiles::RED_COIN,
                     'P' => {
                         if spawn.is_some() {
                             return Err("level has more than one spawn point 'P'".to_string());
@@ -193,12 +232,16 @@ impl LevelData {
 
         let spawn = spawn.ok_or("level has no spawn point 'P'")?;
 
+        validate_exits(&tiles, &exits)?;
+
         Ok(LevelData {
+            id,
             name,
             spawn,
             tiles,
             path_blocks,
             decorations,
+            exits,
         })
     }
 
@@ -211,10 +254,23 @@ impl LevelData {
 
         let mut out = String::new();
         let mut has_header = false;
+        if !self.id.is_empty() {
+            out.push_str("id: ");
+            out.push_str(&self.id);
+            out.push('\n');
+            has_header = true;
+        }
         if !self.name.is_empty() {
             out.push_str("name: ");
             out.push_str(&self.name);
             out.push('\n');
+            has_header = true;
+        }
+        for exit in &self.exits {
+            out.push_str(&format!(
+                "exit: {},{} -> {}\n",
+                exit.tile.0, exit.tile.1, exit.dest
+            ));
             has_header = true;
         }
         for block in &self.path_blocks {
@@ -381,6 +437,85 @@ pub enum Edge {
     Right,
 }
 
+/// Parse the value of an `exit:` header into an [`ExitDoor`]. The value is an
+/// `x,y` tile position, the literal `->`, and a destination level id, e.g.
+/// `8,9 -> forest-2`. The door's type (normal or secret) comes from the grid
+/// tile at `x,y`, not from this line.
+fn parse_exit(spec: &str) -> Result<ExitDoor, String> {
+    let (lhs, rhs) = spec
+        .split_once("->")
+        .ok_or_else(|| format!("invalid exit '{}', expected 'x,y -> level-id'", spec))?;
+
+    let pos = lhs.trim();
+    let (xs, ys) = pos
+        .split_once(',')
+        .ok_or_else(|| format!("invalid exit position '{}', expected 'x,y'", pos))?;
+    let x = xs
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| format!("invalid x in exit position '{}'", pos))?;
+    let y = ys
+        .trim()
+        .parse::<usize>()
+        .map_err(|_| format!("invalid y in exit position '{}'", pos))?;
+
+    let mut rest = rhs.split_whitespace();
+    let dest = rest
+        .next()
+        .ok_or("exit needs a destination level id after '->'")?
+        .to_string();
+    if rest.next().is_some() {
+        return Err(format!(
+            "exit '{}' has too many fields, expected 'x,y -> level-id'",
+            spec
+        ));
+    }
+
+    Ok(ExitDoor { tile: (x, y), dest })
+}
+
+/// Whether a tile is an exit door of either kind (normal or secret) - the tiles
+/// that must be routed by an `exit:` line.
+fn is_door_tile(tile: u32) -> bool {
+    tile == tiles::EXIT || tile == tiles::SECRET_EXIT
+}
+
+/// Check that the `exit:` lines and the grid's door tiles line up exactly: every
+/// door (normal `E` or secret `S`) has one target and every target sits on a
+/// door. There is no implicit fall-through to "the next level", so an untargeted
+/// door is an error.
+fn validate_exits(tiles: &[Vec<u32>], exits: &[ExitDoor]) -> Result<(), String> {
+    for exit in exits {
+        let (x, y) = exit.tile;
+        let on_door = tiles
+            .get(y)
+            .and_then(|row| row.get(x))
+            .is_some_and(|&t| is_door_tile(t));
+        if !on_door {
+            return Err(format!("exit at {},{} is not on an exit door tile", x, y));
+        }
+        if exits.iter().filter(|e| e.tile == exit.tile).count() > 1 {
+            return Err(format!(
+                "more than one exit declared for door at {},{}",
+                x, y
+            ));
+        }
+    }
+
+    for (y, row) in tiles.iter().enumerate() {
+        for (x, &tile) in row.iter().enumerate() {
+            if is_door_tile(tile) && !exits.iter().any(|e| e.tile == (x, y)) {
+                return Err(format!(
+                    "exit door at {},{} has no target; add an 'exit: {},{} -> level-id' line",
+                    x, y, x, y
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Parse the value of a `block:` header into a [`PathBlock`]. The value is a
 /// whitespace-separated list of `x,y` control points, optionally ending with the
 /// word `loop` to close the path. Consecutive points (and the closing wrap, when
@@ -462,7 +597,12 @@ fn parse_decoration(spec: &str, layer: DecoLayer) -> Result<Decoration, String> 
         return Err("decoration sprite index must be 1 or greater".to_string());
     }
 
-    Ok(Decoration { x, y, sprite, layer })
+    Ok(Decoration {
+        x,
+        y,
+        sprite,
+        layer,
+    })
 }
 
 /// Format a pixel coordinate for the level file, dropping the decimal point for
@@ -484,19 +624,42 @@ fn tile_to_char(tile: u32) -> char {
         tiles::MOVE_DOWN => 'v',
         tiles::MOVE_LEFT => '<',
         tiles::EXIT => 'E',
+        tiles::SECRET_EXIT => 'S',
         tiles::COIN => 'C',
+        tiles::RED_COIN => 'R',
         n @ (1 | 3..=8) => char::from_digit(n, 10).unwrap(),
         _ => '.', // EMPTY and anything unexpected
     }
 }
 
 /// Load and parse every `.txt` level file in a directory, in filename order.
-/// Errors are prefixed with the offending file path.
+/// Each exit door's destination is checked against the loaded set; a door whose
+/// target isn't present is only warned about, not rejected, so a single level
+/// can be loaded on its own (e.g. the editor's test-play) even though its doors
+/// point at levels outside the directory. At runtime such a door simply restarts
+/// its level (see `GameEngine::advance_level`). Errors are prefixed with the
+/// offending file path.
 pub fn load_dir(dir: &str) -> Result<Vec<LevelData>, String> {
-    Ok(load_dir_entries(dir)?
-        .into_iter()
-        .map(|(_, level)| level)
-        .collect())
+    let entries = load_dir_entries(dir)?;
+
+    let ids: std::collections::HashSet<&str> = entries.iter().map(|(_, l)| l.id.as_str()).collect();
+    for (path, level) in &entries {
+        for exit in &level.exits {
+            if !ids.contains(exit.dest.as_str()) {
+                eprintln!(
+                    "warning: {}: exit door at {},{} targets level '{}' not in '{}'; \
+                     it will restart the level instead",
+                    path.display(),
+                    exit.tile.0,
+                    exit.tile.1,
+                    exit.dest,
+                    dir,
+                );
+            }
+        }
+    }
+
+    Ok(entries.into_iter().map(|(_, level)| level).collect())
 }
 
 /// Like [`load_dir`], but keeps each level's source path - editors need it to
@@ -513,7 +676,15 @@ pub fn load_dir_entries(dir: &str) -> Result<Vec<(std::path::PathBuf, LevelData)
     for path in paths {
         let text =
             std::fs::read_to_string(&path).map_err(|e| format!("{}: {}", path.display(), e))?;
-        let level = LevelData::parse(&text).map_err(|e| format!("{}: {}", path.display(), e))?;
+        let mut level =
+            LevelData::parse(&text).map_err(|e| format!("{}: {}", path.display(), e))?;
+        // A level with no explicit `id:` is identified by its file stem, so
+        // exits can reference it by filename without a redundant header line.
+        if level.id.is_empty()
+            && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+        {
+            level.id = stem.to_string();
+        }
         levels.push((path, level));
     }
     Ok(levels)
@@ -525,7 +696,7 @@ mod tests {
 
     #[test]
     fn parses_grid_with_all_tile_characters() {
-        let level = LevelData::parse("P.1345678\n^>v<E....").unwrap();
+        let level = LevelData::parse("exit: 4,1 -> next\n\nP.1345678\n^>v<E....").unwrap();
         assert_eq!(level.tiles[0], vec![0, 0, 1, 3, 4, 5, 6, 7, 8]);
         assert_eq!(level.tiles[1], vec![9, 10, 11, 12, 13, 0, 0, 0, 0]);
     }
@@ -547,9 +718,63 @@ mod tests {
     }
 
     #[test]
-    fn header_is_optional() {
-        let level = LevelData::parse("P.E\n111").unwrap();
+    fn name_header_is_optional() {
+        let level = LevelData::parse("exit: 2,0 -> next\n\nP.E\n111").unwrap();
         assert_eq!(level.name, "");
+    }
+
+    #[test]
+    fn parses_normal_and_secret_exit_doors_with_targets() {
+        // 'E' is a normal door, 'S' a secret door; both are routed by exit lines
+        // and the door's kind comes from its grid tile, not the exit line.
+        let level =
+            LevelData::parse("exit: 2,0 -> forest-2\nexit: 0,0 -> bonus\n\nS.E\nP11").unwrap();
+        assert_eq!(level.tiles[0][0], tiles::SECRET_EXIT);
+        assert_eq!(level.tiles[0][2], tiles::EXIT);
+        assert_eq!(
+            level.exits,
+            vec![
+                ExitDoor { tile: (2, 0), dest: "forest-2".to_string() },
+                ExitDoor { tile: (0, 0), dest: "bonus".to_string() },
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_red_coins() {
+        let level = LevelData::parse("exit: 2,0 -> next\n\nR.E\nP11").unwrap();
+        assert_eq!(level.tiles[0][0], tiles::RED_COIN);
+    }
+
+    #[test]
+    fn rejects_door_without_a_target() {
+        let err = LevelData::parse("P.E\n111").unwrap_err();
+        assert!(err.contains("no target"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn rejects_secret_door_without_a_target() {
+        let err = LevelData::parse("P.S\n111").unwrap_err();
+        assert!(err.contains("no target"), "unexpected error: {}", err);
+    }
+
+    #[test]
+    fn rejects_exit_line_not_on_a_door() {
+        let err = LevelData::parse("exit: 0,0 -> next\n\nP.E\n111").unwrap_err();
+        assert!(
+            err.contains("not on an exit door tile"),
+            "unexpected error: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn exit_doors_round_trip_through_to_text() {
+        let original =
+            LevelData::parse("exit: 2,0 -> forest-2\nexit: 0,0 -> bonus\n\nS.E\nP11").unwrap();
+        let reparsed = LevelData::parse(&original.to_text()).unwrap();
+        assert_eq!(reparsed.exits, original.exits);
+        assert_eq!(reparsed.tiles, original.tiles);
     }
 
     #[test]
@@ -583,16 +808,18 @@ mod tests {
     #[test]
     fn to_text_round_trips_through_parse() {
         let original = LevelData::parse(
-            "name: Round Trip\nblock: 1,1 4,1 4,3 1,3 loop\nblock: 2,5 2,7\ndeco: 40,80 27\ndeco: 12.5,0 3\nfgdeco: 80,40 9\n\n.P1345678\n^>v<E.1.E",
+            "id: round-trip\nname: Round Trip\nexit: 4,1 -> level-2\nexit: 8,1 -> bonus\nblock: 1,1 4,1 4,3 1,3 loop\nblock: 2,5 2,7\ndeco: 40,80 27\ndeco: 12.5,0 3\nfgdeco: 80,40 9\n\n.P1345678\n^>v<E.1.E",
         )
         .unwrap();
         let reparsed = LevelData::parse(&original.to_text()).unwrap();
 
+        assert_eq!(reparsed.id, original.id);
         assert_eq!(reparsed.name, original.name);
         assert_eq!(reparsed.spawn, original.spawn);
         assert_eq!(reparsed.tiles, original.tiles);
         assert_eq!(reparsed.path_blocks, original.path_blocks);
         assert_eq!(reparsed.decorations, original.decorations);
+        assert_eq!(reparsed.exits, original.exits);
     }
 
     #[test]
@@ -601,8 +828,18 @@ mod tests {
         assert_eq!(
             level.decorations,
             vec![
-                Decoration { x: 40.0, y: 80.0, sprite: 27, layer: DecoLayer::Background },
-                Decoration { x: 12.5, y: 0.0, sprite: 3, layer: DecoLayer::Background },
+                Decoration {
+                    x: 40.0,
+                    y: 80.0,
+                    sprite: 27,
+                    layer: DecoLayer::Background
+                },
+                Decoration {
+                    x: 12.5,
+                    y: 0.0,
+                    sprite: 3,
+                    layer: DecoLayer::Background
+                },
             ]
         );
     }
@@ -633,14 +870,24 @@ mod tests {
         level.grow(Edge::Left);
         assert_eq!(
             level.decorations[0],
-            Decoration { x: 80.0, y: 80.0, sprite: 5, layer: DecoLayer::Background }
+            Decoration {
+                x: 80.0,
+                y: 80.0,
+                sprite: 5,
+                layer: DecoLayer::Background
+            }
         );
         // Shrinking those edges again restores the original placement.
         level.shrink(Edge::Top);
         level.shrink(Edge::Left);
         assert_eq!(
             level.decorations[0],
-            Decoration { x: 40.0, y: 40.0, sprite: 5, layer: DecoLayer::Background }
+            Decoration {
+                x: 40.0,
+                y: 40.0,
+                sprite: 5,
+                layer: DecoLayer::Background
+            }
         );
     }
 
@@ -649,7 +896,10 @@ mod tests {
         let level =
             LevelData::parse("block: 1,1 4,1 4,3 1,3 loop\nblock: 2,5 2,7\n\nP.\n11").unwrap();
         assert_eq!(level.path_blocks.len(), 2);
-        assert_eq!(level.path_blocks[0].points, vec![(1, 1), (4, 1), (4, 3), (1, 3)]);
+        assert_eq!(
+            level.path_blocks[0].points,
+            vec![(1, 1), (4, 1), (4, 3), (1, 3)]
+        );
         assert!(level.path_blocks[0].closed);
         assert_eq!(level.path_blocks[1].points, vec![(2, 5), (2, 7)]);
         assert!(!level.path_blocks[1].closed);
@@ -658,20 +908,32 @@ mod tests {
     #[test]
     fn rejects_diagonal_path_segment() {
         let err = LevelData::parse("block: 1,1 3,3\n\nP.\n11").unwrap_err();
-        assert!(err.contains("horizontal or vertical"), "unexpected error: {}", err);
+        assert!(
+            err.contains("horizontal or vertical"),
+            "unexpected error: {}",
+            err
+        );
     }
 
     #[test]
     fn rejects_closing_wrap_that_is_not_axis_aligned() {
         // 1,1 -> 4,1 -> 4,3 are fine, but the wrap 4,3 -> 1,1 is diagonal.
         let err = LevelData::parse("block: 1,1 4,1 4,3 loop\n\nP.\n11").unwrap_err();
-        assert!(err.contains("horizontal or vertical"), "unexpected error: {}", err);
+        assert!(
+            err.contains("horizontal or vertical"),
+            "unexpected error: {}",
+            err
+        );
     }
 
     #[test]
     fn rejects_zero_length_path_segment() {
         let err = LevelData::parse("block: 2,2 2,2\n\nP.\n11").unwrap_err();
-        assert!(err.contains("horizontal or vertical"), "unexpected error: {}", err);
+        assert!(
+            err.contains("horizontal or vertical"),
+            "unexpected error: {}",
+            err
+        );
     }
 
     #[test]
@@ -721,7 +983,11 @@ mod tests {
         assert_eq!(level.spawn_tile(), (0, 1));
         assert!(level.shrink(Edge::Bottom));
         assert_eq!(level.height(), 1);
-        assert_eq!(level.spawn_tile(), (0, 0), "spawn clamped into remaining row");
+        assert_eq!(
+            level.spawn_tile(),
+            (0, 0),
+            "spawn clamped into remaining row"
+        );
 
         // Now 2 wide, 1 tall: the last row can't be removed
         assert!(!level.shrink(Edge::Bottom));
