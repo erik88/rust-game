@@ -5,15 +5,14 @@ use sdl2::event::Event;
 use sdl2::keyboard::Keycode;
 use std::collections::HashMap;
 
+/// The inputs the game consumes each frame. Quitting is not part of this
+/// state — it is queried separately via [`InputSource::should_quit`].
 #[derive(Debug, Default, Clone)]
 pub struct InputState {
-    pub up: bool,
-    pub down: bool,
     pub left: bool,
     pub right: bool,
     pub jump: bool,
     pub jump_pressed: bool,
-    pub quit: bool,
 }
 
 impl InputState {
@@ -35,8 +34,6 @@ pub trait InputSource {
 /// not clear a direction another source is still holding.
 #[derive(Debug, Default, Clone)]
 struct DirState {
-    up: bool,
-    down: bool,
     left: bool,
     right: bool,
 }
@@ -93,8 +90,6 @@ impl InputSource for SdlInput {
                 Event::KeyDown {
                     keycode: Some(key), ..
                 } => match key {
-                    Keycode::Up | Keycode::W => self.keyboard.up = true,
-                    Keycode::Down | Keycode::S => self.keyboard.down = true,
                     Keycode::Left | Keycode::A => self.keyboard.left = true,
                     Keycode::Right | Keycode::D => self.keyboard.right = true,
                     Keycode::Space => self.keyboard_jump = true,
@@ -103,8 +98,6 @@ impl InputSource for SdlInput {
                 Event::KeyUp {
                     keycode: Some(key), ..
                 } => match key {
-                    Keycode::Up | Keycode::W => self.keyboard.up = false,
-                    Keycode::Down | Keycode::S => self.keyboard.down = false,
                     Keycode::Left | Keycode::A => self.keyboard.left = false,
                     Keycode::Right | Keycode::D => self.keyboard.right = false,
                     Keycode::Space => self.keyboard_jump = false,
@@ -119,8 +112,6 @@ impl InputSource for SdlInput {
                     self.controllers.remove(&which);
                 }
                 Event::ControllerButtonDown { button, .. } => match button {
-                    Button::DPadUp => self.dpad.up = true,
-                    Button::DPadDown => self.dpad.down = true,
                     Button::DPadLeft => self.dpad.left = true,
                     Button::DPadRight => self.dpad.right = true,
                     // A/B (or X/Y) all jump, so the binding feels natural on any layout.
@@ -129,38 +120,30 @@ impl InputSource for SdlInput {
                     _ => {}
                 },
                 Event::ControllerButtonUp { button, .. } => match button {
-                    Button::DPadUp => self.dpad.up = false,
-                    Button::DPadDown => self.dpad.down = false,
                     Button::DPadLeft => self.dpad.left = false,
                     Button::DPadRight => self.dpad.right = false,
                     Button::A | Button::B | Button::X | Button::Y => self.pad_jump = false,
                     _ => {}
                 },
-                Event::ControllerAxisMotion { axis, value, .. } => match axis {
-                    Axis::LeftX => {
-                        self.stick.left = value < -AXIS_DEADZONE;
-                        self.stick.right = value > AXIS_DEADZONE;
-                    }
-                    Axis::LeftY => {
-                        self.stick.up = value < -AXIS_DEADZONE;
-                        self.stick.down = value > AXIS_DEADZONE;
-                    }
-                    _ => {}
-                },
+                Event::ControllerAxisMotion {
+                    axis: Axis::LeftX,
+                    value,
+                    ..
+                } => {
+                    self.stick.left = value < -AXIS_DEADZONE;
+                    self.stick.right = value > AXIS_DEADZONE;
+                }
                 _ => {}
             }
         }
 
         let jump = self.keyboard_jump || self.pad_jump;
         let state = InputState {
-            up: self.keyboard.up || self.dpad.up || self.stick.up,
-            down: self.keyboard.down || self.dpad.down || self.stick.down,
             left: self.keyboard.left || self.dpad.left || self.stick.left,
             right: self.keyboard.right || self.dpad.right || self.stick.right,
             jump,
             // Edge-detect a jump press across all sources.
             jump_pressed: jump && !self.prev_jump,
-            quit: self.quit,
         };
         self.prev_jump = jump;
         state

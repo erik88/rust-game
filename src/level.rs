@@ -46,24 +46,22 @@
 //! of all of them so it can hide the player, coins and platforms passing behind
 //! it.
 //!
-//! Grid characters:
+//! Grid characters, mapped to the tile ids documented canonically in
+//! [`crate::tiles`]:
 //!
-//! | Char    | Tile                                  |
-//! |---------|---------------------------------------|
-//! | `.`     | 0 - empty space                       |
-//! | `1`-`8` | tile types 1-8 (solid/death/crumbling/periodic) |
-//! | `^`     | 9 - moving tile, goes up              |
-//! | `>`     | 10 - moving tile, goes right          |
-//! | `v`     | 11 - moving tile, goes down           |
-//! | `<`     | 12 - moving tile, goes left           |
-//! | `E`     | 13 - exit tile (open once all coins collected)  |
-//! | `C`     | 14 - coin (collect all to open normal exits)    |
-//! | `S`     | 16 - secret exit tile (opens once all red coins collected) |
-//! | `R`     | 17 - red coin (collect all to open secret exits) |
-//! | `P`     | player spawn point (empty space)      |
+//! | Char    | Tile                                        |
+//! |---------|---------------------------------------------|
+//! | `.`     | 0 - empty space ([`tiles::EMPTY`])          |
+//! | `1`-`8` | tile ids 1-8 (solid/death/crumbling/periodic) |
+//! | `^` `>` `v` `<` | 9-12 - moving tiles ([`tiles::MOVE_UP`] etc.) |
+//! | `E`     | 13 - normal exit door ([`tiles::EXIT`])     |
+//! | `C`     | 14 - gold coin ([`tiles::COIN`])            |
+//! | `S`     | 16 - secret exit door ([`tiles::SECRET_EXIT`]) |
+//! | `R`     | 17 - red coin ([`tiles::RED_COIN`])         |
+//! | `P`     | player spawn point (stored as empty space)  |
 
 use crate::player::{PLAYER_HEIGHT, PLAYER_WIDTH};
-use crate::tiles::{self, TILE_SIZE};
+use crate::tiles::{self, TILE_SIZE, TilePos};
 
 /// A platform that travels along a fixed path of control points. Defined by a
 /// `block:` header line rather than a grid character, because the path is an
@@ -73,7 +71,7 @@ pub struct PathBlock {
     /// Control points in tile coordinates, in path order. Consecutive points
     /// (including the wrap from last to first when `closed`) are always strictly
     /// horizontal or vertical neighbours.
-    pub points: Vec<(usize, usize)>,
+    pub points: Vec<TilePos>,
     /// `true` for a closed loop; `false` for an open path the block bounces back
     /// and forth along.
     pub closed: bool,
@@ -116,7 +114,7 @@ pub struct Decoration {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExitDoor {
     /// Grid coordinates of the door tile this line routes.
-    pub tile: (usize, usize),
+    pub tile: TilePos,
     /// `id` of the level this door leads to.
     pub dest: String,
 }
@@ -326,7 +324,7 @@ impl LevelData {
     /// placement [`parse`] computes for a `P`).
     ///
     /// [`parse`]: LevelData::parse
-    pub fn spawn_tile(&self) -> (usize, usize) {
+    pub fn spawn_tile(&self) -> TilePos {
         let x = (self.spawn.0 - (TILE_SIZE - PLAYER_WIDTH as f32) / 2.0) / TILE_SIZE;
         let y = (self.spawn.1 - (TILE_SIZE - PLAYER_HEIGHT as f32)) / TILE_SIZE;
         (x.round().max(0.0) as usize, y.round().max(0.0) as usize)

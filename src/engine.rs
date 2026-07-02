@@ -1,8 +1,9 @@
+use crate::geometry::vec2d::Vec2d;
 use crate::input::InputState;
 use crate::level::LevelData;
 use crate::player::Player;
 use crate::tilemap::TileMap;
-use crate::tiles;
+use crate::tiles::{self, TILE_SIZE, TilePos};
 use std::collections::HashMap;
 
 pub enum OnDeath {
@@ -16,12 +17,21 @@ pub enum OnDeath {
 // from below) is rejected.
 const EXIT_FEET_TOLERANCE: f32 = 4.0;
 
+/// An open exit door the player is touching: where his bounding box should
+/// ease to (centred on the door, feet on its base) and which door it is.
+struct ExitTarget {
+    /// Pixel position the player's top-left corner eases to.
+    pos: Vec2d,
+    /// Grid position of the door tile, for looking up its destination.
+    door: TilePos,
+}
+
 /// Core game engine - handles game state and logic independent of rendering
 pub struct GameEngine {
-    pub player: Player,
-    pub tilemap: TileMap,
-    pub on_death: OnDeath,
-    pub stopped: bool,
+    player: Player,
+    tilemap: TileMap,
+    on_death: OnDeath,
+    stopped: bool,
     levels: Vec<LevelData>,
     /// Map from each level's `id` to its index in `levels`, so an exit door can
     /// route to its destination by name.
@@ -85,12 +95,12 @@ impl GameEngine {
         }
 
         // If the player is mid-death-animation, advance it and wait for it to finish
-        if self.player.is_dead {
-            self.player.update_death_animation(delta_time);
+        if self.player.is_dead() {
+            let anim_done = self.player.update_death_animation(delta_time);
             // The world is frozen during death, but the death-touch sparkle still
             // needs to animate.
             self.tilemap.update_death_effects(delta_time);
-            if self.player.death_anim_done {
+            if anim_done {
                 match self.on_death {
                     OnDeath::Stop => self.stopped = true,
                     OnDeath::Respawn => {
@@ -105,9 +115,8 @@ impl GameEngine {
         // While the exit animation plays the world is frozen; only the player's
         // walk-into-the-door animation advances. The next level loads once it
         // finishes.
-        if self.player.is_exiting {
-            self.player.update_exit_animation(delta_time);
-            if self.player.exit_anim_done {
+        if self.player.is_exiting() {
+            if self.player.update_exit_animation(delta_time) {
                 self.advance_level();
             }
             return;
@@ -135,36 +144,35 @@ impl GameEngine {
         if self.fallen_outside_playable_area(&self.player)
             || self.tilemap.trigger_death_tiles(&death_bounds)
         {
-            self.player.is_dead = true;
+            self.player.kill();
             return;
         }
 
         // Check if player reached an open exit tile - start the exit animation.
         // A closed door (its coins still uncollected) is skipped by exit_target.
-        if let Some((target_x, target_y, door_tile)) = self.exit_target() {
-            self.pending_dest = self.dest_for_door(door_tile);
-            self.player.start_exit(target_x, target_y);
+        if let Some(target) = self.exit_target() {
+            self.pending_dest = self.dest_for_door(target.door);
+            self.player.start_exit(target.pos.x, target.pos.y);
         }
     }
 
     /// The destination level id of the exit door at the given grid position, if
     /// the current level declares one for it.
-    fn dest_for_door(&self, tile: (usize, usize)) -> Option<String> {
+    fn dest_for_door(&self, tile: TilePos) -> Option<String> {
         self.levels
             .get(self.current_level)
             .and_then(|level| level.exits.iter().find(|e| e.tile == tile))
             .map(|e| e.dest.clone())
     }
 
-    /// If the player is touching an open exit door, the position his bounding
-    /// box should ease to so he is centred horizontally on the door with his
-    /// feet resting on its base, together with that door's grid coordinates.
-    fn exit_target(&self) -> Option<(f32, f32, (usize, usize))> {
+    /// If the player is touching an open exit door, the target he should ease
+    /// to so he is centred horizontally on the door with his feet resting on
+    /// its base, together with that door's grid coordinates.
+    fn exit_target(&self) -> Option<ExitTarget> {
         // Same margin as `is_player_touching_tile_of_type`, so a player merely
         // grazing an adjacent door doesn't trigger the exit.
         let player_bounds = self.player.bounding_rect().shrink(2.0);
         let feet = self.player.y + self.player.height as f32;
-        let tile_size = self.tilemap.tile_size as f32;
         // Normal doors open on the gold coins, secret doors on the red ones; a
         // door whose coins are still uncollected is not enterable.
         let door_types = [
@@ -181,9 +189,13 @@ impl GameEngine {
                 // Only enter when the feet are level with the door's base or
                 // above it; poking into the door from below cannot enter.
                 if player_bounds.intersects(&rect) && feet <= door_base + EXIT_FEET_TOLERANCE {
-                    let target_x = rect.position.x + (tile_size - self.player.width as f32) / 2.0;
-                    let target_y = rect.position.y + tile_size - self.player.height as f32;
-                    return Some((target_x, target_y, (tile.x, tile.y)));
+                    return Some(ExitTarget {
+                        pos: Vec2d::new(
+                            rect.position.x + (TILE_SIZE - self.player.width as f32) / 2.0,
+                            rect.position.y + TILE_SIZE - self.player.height as f32,
+                        ),
+                        door: (tile.x, tile.y),
+                    });
                 }
             }
         }
@@ -203,7 +215,12 @@ impl GameEngine {
     /// True while the player is playing the exit animation, before the next
     /// level loads
     pub fn is_transitioning(&self) -> bool {
-        self.player.is_exiting
+        self.player.is_exiting()
+    }
+
+    /// True once the game has ended (the player died with [`OnDeath::Stop`])
+    pub fn is_stopped(&self) -> bool {
+        self.stopped
     }
 
     fn advance_level(&mut self) {
@@ -229,14 +246,19 @@ impl GameEngine {
     }
 
     pub fn fallen_outside_playable_area(&self, p: &Player) -> bool {
-        // Player is dead if they fall below the screen
-        let screen_height = self.tilemap.height * 40;
-        p.y > screen_height as f32 + 100.0
+        // Player is dead if they fall below the level's bottom edge
+        let level_height = self.tilemap.height as f32 * TILE_SIZE;
+        p.y > level_height + 100.0
     }
 
     /// Get read-only reference to player
     pub fn player(&self) -> &Player {
         &self.player
+    }
+
+    /// Get mutable reference to player (for setup/testing)
+    pub fn player_mut(&mut self) -> &mut Player {
+        &mut self.player
     }
 
     /// Get read-only reference to tilemap

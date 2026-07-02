@@ -23,10 +23,12 @@
 mod fixed_time;
 
 use fixed_time::FixedTime;
+use rustgamex::SCREEN_WIDTH;
 use rustgamex::engine::{GameEngine, OnDeath};
 use rustgamex::input::{InputSource, InputState, QueuedInput};
 use rustgamex::player::Player;
 use rustgamex::tilemap::TileMap;
+use rustgamex::tiles::TILE_SIZE;
 use rustgamex::time::TimeProvider;
 use std::env;
 
@@ -132,9 +134,10 @@ impl TestRunner {
             // Camera follows player
             let player = self.engine.player();
             let tilemap = self.engine.tilemap();
-            let level_width = (tilemap.width as i32) * (tilemap.tile_size as i32);
-            let max_camera_x = (level_width - 800).max(0);
-            let camera_x = (player.x as i32 - 400).max(0).min(max_camera_x);
+            let screen_w = SCREEN_WIDTH as i32;
+            let level_width = tilemap.width as i32 * TILE_SIZE as i32;
+            let max_camera_x = (level_width - screen_w).max(0);
+            let camera_x = (player.x as i32 - screen_w / 2).max(0).min(max_camera_x);
 
             // Clear the canvas with sky blue background
             canvas.set_draw_color(sdl2::pixels::Color::RGB(135, 206, 235));
@@ -470,7 +473,7 @@ mod tests {
         assert!(!engine.is_transitioning(), "Transition should be over");
         assert_eq!(engine.current_level(), 1, "Level 2 should be loaded");
         assert!(
-            !engine.stopped && !engine.player().is_dead,
+            !engine.is_stopped() && !engine.player().is_dead(),
             "Player should be alive at the start of level 2"
         );
     }
@@ -494,9 +497,9 @@ mod tests {
         // Place the player overlapping the door but with his feet hanging well
         // below its base (door spans y 0..40; feet at y+38 = 58). He must not
         // be able to enter from beneath.
-        engine.player.x = 12.0;
-        engine.player.y = 20.0;
-        engine.player.on_ground = false;
+        engine.player_mut().x = 12.0;
+        engine.player_mut().y = 20.0;
+        engine.player_mut().on_ground = false;
         engine.step(&input, dt);
         assert!(
             !engine.is_transitioning(),
@@ -504,9 +507,9 @@ mod tests {
         );
 
         // Now lift him so his feet are level with the door base (y+38 = 40).
-        engine.player.x = 12.0;
-        engine.player.y = 2.0;
-        engine.player.on_ground = true;
+        engine.player_mut().x = 12.0;
+        engine.player_mut().y = 2.0;
+        engine.player_mut().on_ground = true;
         engine.step(&input, dt);
         assert!(
             engine.is_transitioning(),
@@ -748,7 +751,7 @@ mod tests {
             }
 
             assert!(
-                !engine.player().is_dead,
+                !engine.player().is_dead(),
                 "{}: player dies right after spawning",
                 path.display()
             );
@@ -835,7 +838,7 @@ mod tests {
         // the screen (12 rows = 480px + 100px margin, well under 2.5s of falling)
         runner.run_frames(150);
         assert!(
-            runner.engine().player().is_dead,
+            runner.engine().player().is_dead(),
             "Player should have fallen through the phased-out periodic tile"
         );
     }
@@ -977,7 +980,7 @@ mod tests {
             "Platform should have stopped against the wall"
         );
         assert!(
-            platform.destroy_timer.is_some(),
+            platform.destroy_timer().is_some(),
             "A stopped platform should be counting down to destruction"
         );
 
@@ -1006,7 +1009,7 @@ mod tests {
         runner.run_frames(10);
 
         let player = runner.engine().player();
-        assert!(!player.is_dead, "Expected player to be alive.");
+        assert!(!player.is_dead(), "Expected player to be alive.");
     }
 
     #[test]
@@ -1026,7 +1029,7 @@ mod tests {
 
         // Player should have reset to spawn position
         assert!(
-            runner.engine().player().is_dead,
+            runner.engine().player().is_dead(),
             "Expected player to be dead"
         );
     }
@@ -1068,10 +1071,10 @@ mod tests {
         runner.run_frames(30);
 
         assert!(
-            player_start_y - runner.engine.player.y > 80.0,
+            player_start_y - runner.engine().player().y > 80.0,
             "Holding jump should produce a high jump {} {}",
             player_start_y,
-            runner.engine.player.y
+            runner.engine().player().y
         );
     }
 
@@ -1117,7 +1120,7 @@ mod tests {
         // solid tile and is not yet entirely standing on the platform.
         let platform = &runner.engine().tilemap().moving_platforms[0];
         assert!(
-            !platform.active,
+            !platform.is_active(),
             "Platform must stay dormant while the player is still supported by solid ground"
         );
         assert!(
@@ -1154,7 +1157,7 @@ mod tests {
 
         let platform = &runner.engine().tilemap().moving_platforms[0];
         assert!(
-            platform.active,
+            platform.is_active(),
             "Platform must start moving - the player has no other support"
         );
 

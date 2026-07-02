@@ -7,7 +7,9 @@ use rustgamex::engine::{GameEngine, OnDeath};
 use rustgamex::input::{InputSource, SdlInput};
 use rustgamex::level;
 use rustgamex::texture::load_png_texture;
+use rustgamex::tiles::TILE_SIZE;
 use rustgamex::time::{RealTime, TimeProvider};
+use rustgamex::{SCREEN_HEIGHT, SCREEN_WIDTH};
 
 fn parse_args() -> (usize, String) {
     let args: Vec<String> = std::env::args().collect();
@@ -59,7 +61,7 @@ fn main() -> Result<(), String> {
 
     // Create a window
     let window = video_subsystem
-        .window("Platform Game", 800, 600)
+        .window("Platform Game", SCREEN_WIDTH, SCREEN_HEIGHT)
         .position_centered()
         .build()
         .map_err(|e| e.to_string())?;
@@ -110,12 +112,13 @@ fn main() -> Result<(), String> {
         // Camera follows player, centered, clamped to level bounds
         let player = engine.player();
         let tilemap = engine.tilemap();
-        let level_width = (tilemap.width as i32) * (tilemap.tile_size as i32);
-        let level_height = (tilemap.height as i32) * (tilemap.tile_size as i32);
-        let max_camera_x = (level_width - 800).max(0);
-        let max_camera_y = (level_height - 600).max(0);
-        let camera_x = (player.x as i32 - 400).max(0).min(max_camera_x);
-        let camera_y = (player.y as i32 - 300).max(0).min(max_camera_y);
+        let (screen_w, screen_h) = (SCREEN_WIDTH as i32, SCREEN_HEIGHT as i32);
+        let level_width = tilemap.width as i32 * TILE_SIZE as i32;
+        let level_height = tilemap.height as i32 * TILE_SIZE as i32;
+        let max_camera_x = (level_width - screen_w).max(0);
+        let max_camera_y = (level_height - screen_h).max(0);
+        let camera_x = (player.x as i32 - screen_w / 2).max(0).min(max_camera_x);
+        let camera_y = (player.y as i32 - screen_h / 2).max(0).min(max_camera_y);
 
         // Clear the canvas with sky blue background
         canvas.set_draw_color(sdl2::pixels::Color::RGB(135, 206, 235));

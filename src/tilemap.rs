@@ -37,46 +37,79 @@ const COIN_DIAMETER: f32 = 24.0;
 // The frames live at these pixel coordinates in tilemap.png and each shows for
 // COIN_COLLECT_FRAME seconds.
 const COIN_COLLECT_FRAME: f32 = 0.2;
-const COIN_COLLECT_SPRITES: [(i32, i32); 2] = [(80, 160), (120, 160)];
+const COIN_COLLECT_SPRITES: [tiles::SpriteXy; 2] = [(80, 160), (120, 160)];
 
 // Pixel coordinates in tilemap.png of the animation-only sprites that do not
 // correspond to a tile id.
 //
 // The two extra coin sprites shown during the idle shimmer.
-const COIN_SHIMMER_SPRITES: [(i32, i32); 2] = [(40, 160), (40, 200)];
+const COIN_SHIMMER_SPRITES: [tiles::SpriteXy; 2] = [(40, 160), (40, 200)];
 // The red coin's two idle-shimmer sprites (its base is at tiles::RED_COIN).
-const RED_COIN_SHIMMER_SPRITES: [(i32, i32); 2] = [(200, 200), (200, 240)];
+const RED_COIN_SHIMMER_SPRITES: [tiles::SpriteXy; 2] = [(200, 200), (200, 240)];
 // The angry-face sprite a death tile shows after it has killed the player.
-const DEATH_HIT_SPRITE: (i32, i32) = (40, 0);
+const DEATH_HIT_SPRITE: tiles::SpriteXy = (40, 0);
 // The two-frame sparkle flashed at the exact point a death tile was touched. It
 // plays its two sprites in a 1-2-1-2 sequence, each shown DEATH_TOUCH_FRAME
 // seconds, then disappears.
 const DEATH_TOUCH_FRAME: f32 = 0.1;
-const DEATH_TOUCH_SPRITES: [(i32, i32); 2] = [(80, 200), (120, 200)];
+const DEATH_TOUCH_SPRITES: [tiles::SpriteXy; 2] = [(80, 200), (120, 200)];
 const DEATH_TOUCH_SEQUENCE: [usize; 4] = [0, 1, 0, 1];
+
+/// What kind of moving block a [`MovingPlatform`] is. The two kinds share all
+/// their player physics (ride on top, push, crush) but move for different
+/// reasons, and each variant only carries the state that its kind actually
+/// uses — a path block has no activation flag or destroy timer by construction.
+#[derive(Clone)]
+enum Behavior {
+    /// A directional platform extracted from the grid (tiles 9-12): dormant
+    /// until the player steps on it, then travels in its direction until it
+    /// collides and self-destructs.
+    OneShot {
+        active: bool,
+        /// Grid cell the platform started in, so [`TileMap::reset`] can clear
+        /// that cell in the restored grid.
+        original_tile: (i32, i32),
+        /// Time left before a stopped platform is destroyed; `None` until it
+        /// collides with something.
+        destroy_timer: Option<f32>,
+    },
+    /// A block that endlessly follows a fixed path (a `block:` header line).
+    /// Always in motion; never collide-stops.
+    Path(PathState),
+}
 
 #[derive(Clone)]
 pub struct MovingPlatform {
     pub x: f32,
     pub y: f32,
-    pub tile_type: u32, // one of tiles::MOVE_UP/RIGHT/DOWN/LEFT
-    pub active: bool,
+    pub tile_type: u32, // tiles::MOVE_UP/RIGHT/DOWN/LEFT or tiles::PATH_BLOCK
     pub vel_x: f32,
     pub vel_y: f32,
-    pub original_tile_x: i32,
-    pub original_tile_y: i32,
-    // Time left before a stopped platform is destroyed; `None` until it
-    // collides with something
-    pub destroy_timer: Option<f32>,
-    // When set, the platform endlessly follows this fixed path instead of being
-    // a one-shot platform that activates on touch and self-destructs. Path
-    // blocks are always `active`, never collide-stop, and have no destroy_timer.
-    pub path: Option<PathState>,
+    behavior: Behavior,
 }
 
 impl MovingPlatform {
     pub fn rect(&self) -> Rect {
         Rect::new(Vec2d::new(self.x, self.y), Vec2d::new(TILE_SIZE, TILE_SIZE))
+    }
+
+    /// Whether the platform is currently in motion (or would move next frame).
+    /// Path blocks are always active; one-shot platforms only after the player
+    /// has stepped on them.
+    pub fn is_active(&self) -> bool {
+        match &self.behavior {
+            Behavior::OneShot { active, .. } => *active,
+            Behavior::Path(_) => true,
+        }
+    }
+
+    /// Time left until a stopped one-shot platform is destroyed. `None` while
+    /// it has not collided yet, and always `None` for path blocks.
+    pub fn destroy_timer(&self) -> Option<f32> {
+        match &self.behavior {
+            Behavior::OneShot { destroy_timer, .. } => *destroy_timer,
+            Behavior::Path(_) => None,
+        }
     }
 }
 
@@ -135,6 +168,11 @@ struct DeathEffect {
     timer: f32,
 }
 
+/// How many tiles of the given type a grid holds.
+fn count_tiles(tiles: &[Vec<u32>], tile: u32) -> usize {
+    tiles.iter().flatten().filter(|&&t| t == tile).count()
+}
+
 /// The point on a death tile's border where its touch sparkle is centred: the
 /// intersection of the tile's square edge with the line from the tile centre to
 /// `player_center`. Falls back to the tile centre if the player sits exactly on
@@ -156,7 +194,9 @@ fn death_touch_point((tx, ty): (usize, usize), player_center: Vec2d) -> Vec2d {
 pub struct TileMap {
     pub width: usize,
     pub height: usize,
-    pub tile_size: u32,
+    /// The tile grid. Coin tiles must only be removed through
+    /// [`collect_coins`](Self::collect_coins), which keeps the cached coin
+    /// counts (and thus the door-open state) in step with the grid.
     pub tiles: Vec<Vec<u32>>,
     original_tiles: Vec<Vec<u32>>, // Store original state for reset
     disappearing_tiles: HashMap<(usize, usize), f32>, // (x, y) -> time remaining
@@ -166,6 +206,10 @@ pub struct TileMap {
     original_path_blocks: Vec<MovingPlatform>, // Original path-block state for reset
     periodic_timer: f32,                     // Shared clock for periodic tiles (7/8)
     coin_timer: f32,                         // Shared clock for the coin shimmer animation
+    // Uncollected coins of each kind, cached so the per-frame door-open checks
+    // don't rescan the grid. Kept in sync by collect_coins/reset.
+    gold_coins: usize,
+    red_coins: usize,
     triggered_death_tiles: HashSet<(usize, usize)>, // Death tiles the player has hit this life
     coin_effects: Vec<CoinEffect>,           // Sparkles playing where coins were collected
     death_effects: Vec<DeathEffect>,         // Sparkles playing where death tiles were touched
@@ -205,23 +249,25 @@ impl TileMap {
                         x: x as f32 * TILE_SIZE,
                         y: y as f32 * TILE_SIZE,
                         tile_type: tile,
-                        active: false,
                         vel_x: 0.0,
                         vel_y: 0.0,
-                        original_tile_x: x as i32,
-                        original_tile_y: y as i32,
-                        destroy_timer: None,
-                        path: None,
+                        behavior: Behavior::OneShot {
+                            active: false,
+                            original_tile: (x as i32, y as i32),
+                            destroy_timer: None,
+                        },
                     });
                     tiles[y][x] = tiles::EMPTY;
                 }
             }
         }
 
+        let gold_coins = count_tiles(&tiles, tiles::COIN);
+        let red_coins = count_tiles(&tiles, tiles::RED_COIN);
+
         Self {
             width,
             height,
-            tile_size: TILE_SIZE as u32,
             original_tiles: level_data,
             tiles,
             disappearing_tiles: HashMap::new(),
@@ -231,6 +277,8 @@ impl TileMap {
             original_path_blocks: Vec::new(),
             periodic_timer: 0.0,
             coin_timer: 0.0,
+            gold_coins,
+            red_coins,
             triggered_death_tiles: HashSet::new(),
             coin_effects: Vec::new(),
             death_effects: Vec::new(),
@@ -258,13 +306,9 @@ impl TileMap {
                 x: start.x,
                 y: start.y,
                 tile_type: tiles::PATH_BLOCK,
-                active: true,
                 vel_x: 0.0,
                 vel_y: 0.0,
-                original_tile_x: def.points[0].0 as i32,
-                original_tile_y: def.points[0].1 as i32,
-                destroy_timer: None,
-                path: Some(PathState {
+                behavior: Behavior::Path(PathState {
                     points,
                     closed: def.closed,
                     target: 1,
@@ -280,31 +324,38 @@ impl TileMap {
         // Restore all tiles to original state (but platforms are not in the grid)
         self.tiles = self.original_tiles.clone();
         for platform in &self.original_platforms {
-            self.tiles[platform.original_tile_y as usize][platform.original_tile_x as usize] =
-                tiles::EMPTY;
+            if let Behavior::OneShot {
+                original_tile: (x, y),
+                ..
+            } = platform.behavior
+            {
+                self.tiles[y as usize][x as usize] = tiles::EMPTY;
+            }
         }
         self.disappearing_tiles.clear();
         self.moving_platforms = self.original_platforms.clone();
         self.path_blocks = self.original_path_blocks.clone();
         self.periodic_timer = 0.0;
         self.coin_timer = 0.0;
+        self.gold_coins = count_tiles(&self.tiles, tiles::COIN);
+        self.red_coins = count_tiles(&self.tiles, tiles::RED_COIN);
         self.triggered_death_tiles.clear();
         self.coin_effects.clear();
         self.death_effects.clear();
     }
 
-    pub fn tiles_of_type(&self, t: u32) -> Vec<Tile> {
+    /// Every tile of the given type currently in the grid, with its position.
+    pub fn tiles_of_type(&self, t: u32) -> impl Iterator<Item = Tile> + '_ {
         self.tiles
             .iter()
             .flatten()
             .enumerate()
-            .filter(|(_, tile_type)| **tile_type == t)
+            .filter(move |(_, tile_type)| **tile_type == t)
             .map(|(index, &tile_type)| Tile {
                 tile_type,
                 x: index % self.width,
                 y: index / self.width,
             })
-            .collect::<Vec<Tile>>()
     }
 
     /// Every block the player physically interacts with: the one-shot moving
@@ -383,13 +434,21 @@ impl TileMap {
         let height = self.height;
 
         for (i, platform) in self.moving_platforms.iter_mut().enumerate() {
-            if !platform.active {
+            let Behavior::OneShot {
+                active,
+                destroy_timer,
+                ..
+            } = &mut platform.behavior
+            else {
+                continue;
+            };
+            if !*active {
                 continue;
             }
 
             // A platform that already collided is winding down to destruction;
             // count it down and remove it once the delay elapses.
-            if let Some(timer) = platform.destroy_timer.as_mut() {
+            if let Some(timer) = destroy_timer.as_mut() {
                 *timer -= delta_time;
                 if *timer <= 0.0 {
                     platforms_to_remove.push(i);
@@ -438,7 +497,7 @@ impl TileMap {
             if collided {
                 platform.vel_x = 0.0;
                 platform.vel_y = 0.0;
-                platform.destroy_timer = Some(PLATFORM_DESTROY_DELAY);
+                *destroy_timer = Some(PLATFORM_DESTROY_DELAY);
             }
         }
 
@@ -455,7 +514,7 @@ impl TileMap {
     /// the one-shot moving platforms.
     fn update_path_blocks(&mut self, delta_time: f32) {
         for block in &mut self.path_blocks {
-            let Some(path) = block.path.as_mut() else {
+            let Behavior::Path(path) = &mut block.behavior else {
                 continue;
             };
 
@@ -501,7 +560,10 @@ impl TileMap {
     /// Activate the (inactive) platform occupying the given tile position
     pub fn activate_platform(&mut self, tile_x: i32, tile_y: i32) {
         for platform in &mut self.moving_platforms {
-            if platform.active {
+            let Behavior::OneShot { active, .. } = &mut platform.behavior else {
+                continue;
+            };
+            if *active {
                 continue;
             }
             let px = (platform.x / TILE_SIZE) as i32;
@@ -510,7 +572,7 @@ impl TileMap {
                 continue;
             }
 
-            platform.active = true;
+            *active = true;
             let (vel_x, vel_y) = match platform.tile_type {
                 tiles::MOVE_UP => (0.0, -PLATFORM_SPEED),
                 tiles::MOVE_RIGHT => (PLATFORM_SPEED, 0.0),
@@ -548,16 +610,23 @@ impl TileMap {
         let mut collected = 0;
         let inset = (TILE_SIZE - COIN_DIAMETER) / 2.0;
         for coin_type in [tiles::COIN, tiles::RED_COIN] {
-            for tile in self.tiles_of_type(coin_type) {
-                if player_bounds.intersects(&tile.get_bounding_rect().shrink(inset)) {
-                    self.tiles[tile.y][tile.x] = tiles::EMPTY;
-                    self.coin_effects.push(CoinEffect {
-                        tile_x: tile.x,
-                        tile_y: tile.y,
-                        timer: 0.0,
-                    });
-                    collected += 1;
+            let hits: Vec<(usize, usize)> = self
+                .tiles_of_type(coin_type)
+                .filter(|tile| player_bounds.intersects(&tile.get_bounding_rect().shrink(inset)))
+                .map(|tile| (tile.x, tile.y))
+                .collect();
+            for (x, y) in hits {
+                self.tiles[y][x] = tiles::EMPTY;
+                match coin_type {
+                    tiles::COIN => self.gold_coins -= 1,
+                    _ => self.red_coins -= 1,
                 }
+                self.coin_effects.push(CoinEffect {
+                    tile_x: x,
+                    tile_y: y,
+                    timer: 0.0,
+                });
+                collected += 1;
             }
         }
         collected
@@ -572,17 +641,20 @@ impl TileMap {
             player_bounds.position.x + player_bounds.size.x / 2.0,
             player_bounds.position.y + player_bounds.size.y / 2.0,
         );
-        for tile in self.tiles_of_type(tiles::DEATH) {
-            if player_bounds.intersects(&tile.get_bounding_rect()) {
-                // Only spawn the touch sparkle the first time this tile is hit.
-                if self.triggered_death_tiles.insert((tile.x, tile.y)) {
-                    self.death_effects.push(DeathEffect {
-                        center: death_touch_point((tile.x, tile.y), player_center),
-                        timer: 0.0,
-                    });
-                }
-                hit = true;
+        let touched: Vec<(usize, usize)> = self
+            .tiles_of_type(tiles::DEATH)
+            .filter(|tile| player_bounds.intersects(&tile.get_bounding_rect()))
+            .map(|tile| (tile.x, tile.y))
+            .collect();
+        for pos in touched {
+            // Only spawn the touch sparkle the first time this tile is hit.
+            if self.triggered_death_tiles.insert(pos) {
+                self.death_effects.push(DeathEffect {
+                    center: death_touch_point(pos, player_center),
+                    timer: 0.0,
+                });
             }
+            hit = true;
         }
         hit
     }
@@ -598,19 +670,14 @@ impl TileMap {
         self.death_effects.retain(|effect| effect.timer < total);
     }
 
-    /// How many uncollected coins of a given type remain in the level.
-    fn count_tiles(&self, tile: u32) -> usize {
-        self.tiles.iter().flatten().filter(|&&t| t == tile).count()
-    }
-
     /// How many uncollected gold coins remain in the level.
     pub fn coins_remaining(&self) -> usize {
-        self.count_tiles(tiles::COIN)
+        self.gold_coins
     }
 
     /// How many uncollected red coins remain in the level.
     pub fn red_coins_remaining(&self) -> usize {
-        self.count_tiles(tiles::RED_COIN)
+        self.red_coins
     }
 
     /// Normal exit doors stay shut until every gold coin has been collected.
@@ -640,14 +707,14 @@ impl TileMap {
 
     /// Source rectangle for a 40x40 sprite at the given pixel coordinate in
     /// tilemap.png.
-    fn sprite_rect(&self, (x, y): (i32, i32)) -> sdl2::rect::Rect {
-        sdl2::rect::Rect::new(x, y, self.tile_size, self.tile_size)
+    fn sprite_rect(&self, (x, y): tiles::SpriteXy) -> sdl2::rect::Rect {
+        sdl2::rect::Rect::new(x, y, TILE_SIZE as u32, TILE_SIZE as u32)
     }
 
     /// Pixel coordinate of the coin sprite to draw this frame: the idle shimmer
     /// flashes its two extra sprites at the start of each cycle, then rests on
     /// the normal coin graphic for the remainder.
-    fn coin_sprite(&self) -> (i32, i32) {
+    fn coin_sprite(&self) -> tiles::SpriteXy {
         if self.coin_timer < COIN_ANIM_FRAME {
             COIN_SHIMMER_SPRITES[0]
         } else if self.coin_timer < COIN_ANIM_FRAME * 2.0 {
@@ -659,7 +726,7 @@ impl TileMap {
 
     /// Pixel coordinate of the red coin sprite to draw this frame, mirroring the
     /// gold [`coin_sprite`](Self::coin_sprite) idle shimmer on the same clock.
-    fn red_coin_sprite(&self) -> (i32, i32) {
+    fn red_coin_sprite(&self) -> tiles::SpriteXy {
         if self.coin_timer < COIN_ANIM_FRAME {
             RED_COIN_SHIMMER_SPRITES[0]
         } else if self.coin_timer < COIN_ANIM_FRAME * 2.0 {
@@ -671,7 +738,7 @@ impl TileMap {
 
     /// Pixel coordinate of a destroying platform's sprite for the given decay
     /// frame (0 = just collided, 1 = final stretch before removal).
-    fn platform_destroy_sprite(tile_type: u32, frame: usize) -> (i32, i32) {
+    fn platform_destroy_sprite(tile_type: u32, frame: usize) -> tiles::SpriteXy {
         match (tile_type, frame) {
             (tiles::MOVE_UP, 0) => (80, 80),
             (tiles::MOVE_UP, _) => (80, 120),
@@ -693,9 +760,10 @@ impl TileMap {
         camera_y: i32,
     ) {
         // Calculate which tiles are visible
-        let start_col = (camera_x / self.tile_size as i32).max(0) as usize;
-        let end_col =
-            ((camera_x + 800) / self.tile_size as i32 + 1).min(self.width as i32) as usize;
+        let tile_size = TILE_SIZE as i32;
+        let start_col = (camera_x / tile_size).max(0) as usize;
+        let end_col = ((camera_x + crate::SCREEN_WIDTH as i32) / tile_size + 1)
+            .min(self.width as i32) as usize;
 
         // Once all coins of a kind are collected, that door type shows its open
         // sprite: gold coins open the normal doors, red coins the secret ones.
@@ -721,10 +789,10 @@ impl TileMap {
                 };
 
                 let dst_rect = sdl2::rect::Rect::new(
-                    (col as i32 * self.tile_size as i32) - camera_x,
-                    (row as i32 * self.tile_size as i32) - camera_y,
-                    self.tile_size,
-                    self.tile_size,
+                    (col as i32 * tile_size) - camera_x,
+                    (row as i32 * tile_size) - camera_y,
+                    TILE_SIZE as u32,
+                    TILE_SIZE as u32,
                 );
 
                 // Pick the source sprite: coins shimmer through their extra
@@ -759,14 +827,14 @@ impl TileMap {
             let dst_rect = sdl2::rect::Rect::new(
                 platform.x as i32 - camera_x,
                 platform.y as i32 - camera_y,
-                self.tile_size,
-                self.tile_size,
+                TILE_SIZE as u32,
+                TILE_SIZE as u32,
             );
 
             // A collided platform animates toward destruction, flashing its
             // first decay sprite the moment it collides and the second for the
             // final stretch, telegraphing its imminent removal.
-            let sprite = match platform.destroy_timer {
+            let sprite = match platform.destroy_timer() {
                 Some(timer) => {
                     let frame = if timer <= PLATFORM_DESTROY_DELAY / 2.0 {
                         1
@@ -792,10 +860,10 @@ impl TileMap {
             };
             let src_rect = self.sprite_rect(sprite);
             let dst_rect = sdl2::rect::Rect::new(
-                (effect.tile_x as i32 * self.tile_size as i32) - camera_x,
-                (effect.tile_y as i32 * self.tile_size as i32) - camera_y,
-                self.tile_size,
-                self.tile_size,
+                (effect.tile_x as i32 * TILE_SIZE as i32) - camera_x,
+                (effect.tile_y as i32 * TILE_SIZE as i32) - camera_y,
+                TILE_SIZE as u32,
+                TILE_SIZE as u32,
             );
             canvas
                 .copy(texture, Some(src_rect), Some(dst_rect))
@@ -829,8 +897,8 @@ impl TileMap {
             let dst_rect = sdl2::rect::Rect::new(
                 (effect.center.x - TILE_SIZE / 2.0) as i32 - camera_x,
                 (effect.center.y - TILE_SIZE / 2.0) as i32 - camera_y,
-                self.tile_size,
-                self.tile_size,
+                TILE_SIZE as u32,
+                TILE_SIZE as u32,
             );
             canvas
                 .copy(texture, Some(src_rect), Some(dst_rect))
@@ -851,8 +919,8 @@ impl TileMap {
             let dst_rect = sdl2::rect::Rect::new(
                 deco.x as i32 - camera_x,
                 deco.y as i32 - camera_y,
-                self.tile_size,
-                self.tile_size,
+                TILE_SIZE as u32,
+                TILE_SIZE as u32,
             );
             let sprite = tiles::sheet_src_xy(deco.sprite);
             canvas

@@ -1,31 +1,59 @@
+# Working on this repo
+
+## Commands
+
+```bash
+cargo run                      # run the game
+cargo run --bin level_editor   # run the level editor
+cargo test                     # run the whole test suite
+```
+
+The game accepts `--start-level <index>` (0-based, in filename order) and
+`--levels-dir <dir>` (default `levels/`). Assets (`character.png`,
+`tilemap.png`) and `levels/` are loaded from the current working directory, so
+run cargo from the project root.
+
+Engine tests can be watched visually: `VISUALIZE_TEST=1 cargo test <name> --
+--nocapture` opens a window and plays the test frame by frame (see
+`TEST_VISUALIZATION.md` / `visualize_test.sh`).
+
+## Module map
+
+- `src/engine.rs` — `GameEngine`: orchestrates one frame (`step`), level
+  progression through exit doors, death/respawn.
+- `src/tilemap.rs` — `TileMap`: the tile grid plus all dynamic world state
+  (crumbling/periodic tiles, moving platforms, path blocks, coin bookkeeping,
+  effects) and world rendering.
+- `src/player.rs` — `Player`: input-driven physics, collision resolution,
+  platform riding/pushing, and the death/exit animation state machine.
+- `src/level.rs` — the ASCII level file format (`LevelData::parse` /
+  `to_text`) and directory loading. The format is documented in its module doc.
+- `src/tiles.rs` — **canonical tile ids, semantics and sprite positions.**
+- `src/input.rs`, `src/time.rs`, `src/texture.rs`, `src/font.rs` — SDL glue,
+  each with a test-friendly abstraction (`InputSource`, `TimeProvider`).
+- `src/bin/level_editor/` — the level editor binary, split into `editor`
+  (state + commands), `layout`, `tools`, `path_edit`, `select`, `draw`.
+- `tests/game_tests.rs` — engine-level integration tests (`TestRunner`).
+
+## Invariants worth knowing
+
+- **Update order:** each frame the tilemap updates before the player
+  (`GameEngine::step`). Platform carry/push physics and several regression
+  tests depend on this ordering; tests reproduce it manually as
+  `tilemap.update(dt); player.update(...)`.
+- The window size is `SCREEN_WIDTH`/`SCREEN_HEIGHT` in `src/lib.rs`; render
+  culling and camera clamping derive from it.
+- Coin tiles must only be removed via `TileMap::collect_coins`, which keeps
+  the cached coin counts (and door-open state) in sync with the grid.
+
 # Tilemap
 
-The tiles are located inside "tilemap.png". They are 40x40 pixels.
-Tile with index 1 is located at (0,0), tile with index 2 is located at (40,0), etc.
-There are six tiles per row, so tile 7 is located at (0,40);
+The sprites are in `tilemap.png`, 40x40 pixels each, six per row. Counting
+1-based, sprite 1 is at (0,0), sprite 2 at (40,0), sprite 7 at (0,40), etc.
 
-| Tile number | Description                                                  |
-|-------------|--------------------------------------------------------------|
-| 0           | Technically not a tile - 0 just describes empty space.       |
-| 1           | A solid tile                                                 |
-| 2           | A solid tile, dark variation                                 |
-| 3           | A death tile, the player dies when colliding with this       |
-| 4           | A crumbling tile, it will turn into tile 5 after 0.4 seconds |
-| 5           | A crumbling tile, it will turn into tile 6 after 0.3 seconds |
-| 6           | A crumbling tile, it will disappear after 0.3 seconds        |
-| 7           | A periodic tile, solid. It will turn into tile 8 after 1 second |
-| 8           | A periodic tile, NOT solid. It will turn into tile 7 after 1 second |
-| 9           | A moving tile. Goes upwards.                                 |
-| 10          | A moving tile. Goes right.                                   |
-| 11          | A moving tile. Goes down.                                    |
-| 12          | A moving tile. Goes left.                                    |
-| 13          | An exit tile (door), CLOSED. Not solid. Opens once all GOLD coins are collected; touching it while open completes the level. |
-| 14          | A gold coin. Not solid. Collected on touch. All gold coins must be collected before the normal exit doors open. |
-| 15          | A path block. Render-only sprite for the moving blocks declared with `block:` headers; never stored in the tile grid. |
-| 16          | A secret exit tile (door), CLOSED. Like tile 13, but opens once all RED coins are collected. Sprite at (0,200), just below the normal door. |
-| 17          | A red coin. Not solid. Collected on touch. All red coins must be collected before the secret exit doors open. Sprite at (200,160). |
-| 19          | An exit tile (door), OPEN. Render-only sprite shown for tile 13 once all gold coins are collected; never stored in a level file. |
-| 20          | A secret exit tile (door), OPEN. Render-only sprite shown for tile 16 once all red coins are collected; never stored in a level file. Sprite at (0,240). |
+**The canonical list of tile ids, their gameplay semantics and their sprite
+positions lives in `src/tiles.rs`** — consult and update it there. Design
+intent that the constants can't express:
 
 ## Coins and the exits
 There are two independent coin/door currencies:
@@ -34,23 +62,24 @@ There are two independent coin/door currencies:
 
 For each kind: while any of its coins remain, that door type renders with its
 CLOSED sprite and touching it does nothing. Once every coin of that kind is
-collected, its doors render with the OPEN sprite (tile 19 / 20) and touching one
-completes the level. A level with no red coins leaves its secret doors open from
-the start (and likewise for gold coins and normal doors).
+collected, its doors render with the OPEN sprite and touching one completes
+the level. A level with no red coins leaves its secret doors open from the
+start (and likewise for gold coins and normal doors).
 
-## Moving tiles
+## Moving tiles (9-12)
 - Solid, the player cannot be inside them.
-- Activate when the player steps on top of them, and start moving in their respective direction.
+- Activate when the player steps on top of them, and start moving in their
+  respective direction (9 up, 10 right, 11 down, 12 left).
 - Horizontally moving tiles (left/right) will
-  - Push the player ahead of them if he is in the way 
+  - Push the player ahead of them if he is in the way
   - Carry the player forward, the player is standing on top of them.
 
 ## Path blocks
-- A solid block (rendered with its own sprite, tile id 15 at (0,80)) that endlessly travels a
-  fixed path of control points, set by a `block:` header line rather than a grid
-  character (see "Levels" below). They reuse the same carry/push physics as the
-  moving tiles above: the player can ride on top and is pushed/crushed when the
-  block moves into him.
+- A solid block (tile id 15) that endlessly travels a fixed path of control
+  points, set by a `block:` header line rather than a grid character (see
+  "Levels" below). They reuse the same carry/push physics as the moving tiles
+  above: the player can ride on top and is pushed/crushed when the block moves
+  into him.
 - Consecutive control points must be strictly horizontal or vertical neighbours.
 - A trailing `loop` makes the path a closed cycle; without it the block reverses
   direction at each end (an open, back-and-forth path).

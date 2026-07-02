@@ -1,5 +1,21 @@
-//! Tile types and their semantics. The visual layout of these tiles in
-//! tilemap.png is documented in CLAUDE.md.
+//! Tile types and their semantics. **This module is the canonical
+//! documentation for what each tile id means** — CLAUDE.md and the level
+//! format docs in [`crate::level`] point here rather than repeating it.
+//!
+//! # The sprite sheet (tilemap.png)
+//!
+//! Sprites are 40x40 pixels, laid out six per row ([`SHEET_COLUMNS`]).
+//! Counting 1-based, sprite 1 is at (0,0), sprite 2 at (40,0), sprite 7 at
+//! (0,40), and so on — [`sheet_src_xy`] computes this. Most tile ids happen to
+//! match their sheet position, but not all: [`tile_src_xy`] maps each gameplay
+//! tile id to the literal pixel position of its sprite.
+
+/// A position in the tile grid, `(column, row)`. Distinct from pixel (world)
+/// coordinates, which are `f32` and 40x larger; see [`TILE_SIZE`].
+pub type TilePos = (usize, usize);
+
+/// The top-left pixel coordinate of a sprite within tilemap.png.
+pub type SpriteXy = (i32, i32);
 
 /// Width and height of a tile in pixels
 pub const TILE_SIZE: f32 = 40.0;
@@ -58,7 +74,7 @@ pub const SHEET_COLUMNS: u32 = 6;
 /// [`tile_src_xy`], which maps gameplay tile ids to their (possibly irregular)
 /// sprite positions, this addresses the sheet purely by position so decorations
 /// can reference *any* sprite regardless of gameplay meaning.
-pub fn sheet_src_xy(index: u32) -> (i32, i32) {
+pub fn sheet_src_xy(index: u32) -> SpriteXy {
     let i = index.saturating_sub(1);
     let col = (i % SHEET_COLUMNS) as i32;
     let row = (i / SHEET_COLUMNS) as i32;
@@ -68,7 +84,7 @@ pub fn sheet_src_xy(index: u32) -> (i32, i32) {
 /// Top-left pixel coordinate of a tile's graphic within tilemap.png. The sheet
 /// is 240x240 (six 40px tiles per row); these are the literal positions of each
 /// sprite rather than offsets derived from the tile index.
-pub fn tile_src_xy(tile_id: u32) -> (i32, i32) {
+pub fn tile_src_xy(tile_id: u32) -> SpriteXy {
     match tile_id {
         SOLID => (0, 0),
         DEATH => (80, 0),

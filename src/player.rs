@@ -2,6 +2,7 @@ use crate::geometry::rect::Rect;
 use crate::geometry::vec2d::Vec2d;
 use crate::input::InputState;
 use crate::tilemap::{MovingPlatform, TileMap};
+use crate::tiles::TILE_SIZE;
 use sdl2::render::{Texture, WindowCanvas};
 
 /// Phases of the exit sequence the player plays after reaching an open door.
@@ -16,6 +17,42 @@ enum ExitPhase {
     Entering,
 }
 
+/// Progress of the death animation.
+#[derive(Clone, Copy)]
+struct DeathAnim {
+    frame: usize,
+    timer: f32,
+    done: bool,
+}
+
+/// Progress of the exit sequence: the player is first eased into alignment
+/// with the door, then plays the "stepping into the door" animation (third
+/// sprite-sheet row) where he shrinks inwards.
+#[derive(Clone, Copy)]
+struct ExitAnim {
+    phase: ExitPhase,
+    /// Where the player's bounding box eases to: centred on the door with his
+    /// feet resting on its base.
+    target: Vec2d,
+    frame: usize,
+    timer: f32,
+    done: bool,
+}
+
+/// What the player is currently doing. Exactly one of these holds at a time,
+/// and each animation's transient state lives only inside its variant, so
+/// impossible combinations (dead *and* exiting, exit fields read outside an
+/// exit) cannot be expressed.
+#[derive(Clone, Copy)]
+enum PlayerState {
+    /// Normal play: input, physics and collisions apply.
+    Alive,
+    /// Playing the death animation; the world is frozen around him.
+    Dying(DeathAnim),
+    /// Playing the exit sequence into a door; the world is frozen around him.
+    Exiting(ExitAnim),
+}
+
 pub struct Player {
     pub x: f32,
     pub y: f32,
@@ -26,8 +63,9 @@ pub struct Player {
     pub on_ground: bool,
     was_on_ground: bool,
 
-    // Spawn and death
-    pub is_dead: bool,
+    state: PlayerState,
+
+    // Spawn position, for reset()
     spawn_x: f32,
     spawn_y: f32,
 
@@ -35,22 +73,6 @@ pub struct Player {
     frame: usize,
     frame_time: f32,
     facing_right: bool,
-
-    // Death animation
-    death_frame: usize,
-    death_anim_timer: f32,
-    pub death_anim_done: bool,
-
-    // Exit animation: when the player reaches an open door he is first eased
-    // into alignment with the door, then plays the "stepping into the door"
-    // animation (third sprite-sheet row) where he shrinks inwards.
-    pub is_exiting: bool,
-    exit_phase: ExitPhase,
-    exit_target_x: f32,
-    exit_target_y: f32,
-    exit_frame: usize,
-    exit_anim_timer: f32,
-    pub exit_anim_done: bool,
 }
 
 pub const PLAYER_WIDTH: u32 = 16;
@@ -81,6 +103,19 @@ fn near_platform_top(player_bottom: f32, platform_top: f32) -> bool {
         && player_bottom <= platform_top + PLATFORM_RIDE_TOLERANCE
 }
 
+/// How the moving platforms touch the player this frame, gathered by
+/// [`Player::scan_platform_contacts`].
+#[derive(Default)]
+struct PlatformContacts {
+    /// Tile position of a dormant platform the player just committed to,
+    /// which should start moving.
+    activate: Option<(i32, i32)>,
+    /// `(vel_x, platform_top)` of the platform the player is riding.
+    riding: Option<(f32, f32)>,
+    /// Horizontal velocity of a platform shoving the player at his side.
+    side_push: Option<f32>,
+}
+
 impl Player {
     pub fn new(x: f32, y: f32) -> Self {
         Self {
@@ -92,22 +127,34 @@ impl Player {
             vel_y: 0.0,
             on_ground: false,
             was_on_ground: false,
+            state: PlayerState::Alive,
             spawn_x: x,
             spawn_y: y,
-            is_dead: false,
             frame: 0,
             frame_time: 0.0,
             facing_right: true,
-            death_frame: 0,
-            death_anim_timer: 0.0,
-            death_anim_done: false,
-            is_exiting: false,
-            exit_phase: ExitPhase::Walking,
-            exit_target_x: x,
-            exit_target_y: y,
-            exit_frame: 0,
-            exit_anim_timer: 0.0,
-            exit_anim_done: false,
+        }
+    }
+
+    /// True while the player is playing his death animation.
+    pub fn is_dead(&self) -> bool {
+        matches!(self.state, PlayerState::Dying(_))
+    }
+
+    /// True while the player is playing the exit sequence into a door.
+    pub fn is_exiting(&self) -> bool {
+        matches!(self.state, PlayerState::Exiting(_))
+    }
+
+    /// Start the death animation. Only an alive player can die; killing him
+    /// twice in one frame (e.g. two overlapping death tiles) is a no-op.
+    pub fn kill(&mut self) {
+        if matches!(self.state, PlayerState::Alive) {
+            self.state = PlayerState::Dying(DeathAnim {
+                frame: 0,
+                timer: 0.0,
+                done: false,
+            });
         }
     }
 
@@ -133,7 +180,7 @@ impl Player {
             return;
         }
 
-        let tile_size = tilemap.tile_size as f32;
+        let tile_size = TILE_SIZE;
         let player_right = self.x + self.width as f32;
         let player_bottom = self.y + self.height as f32;
 
@@ -189,54 +236,65 @@ impl Player {
         }
     }
 
-    pub fn update_death_animation(&mut self, delta_time: f32) {
-        if self.death_anim_done {
-            return;
-        }
-        self.death_anim_timer += delta_time;
-        if self.death_anim_timer >= DEATH_FRAME_DURATION {
-            self.death_anim_timer -= DEATH_FRAME_DURATION;
-            if self.death_frame < DEATH_FRAMES - 1 {
-                self.death_frame += 1;
-            } else {
-                self.death_anim_done = true;
+    /// Advance the death animation. Returns true once its final frame has been
+    /// shown (and keeps returning true after that). Returns false when the
+    /// player is not dying at all.
+    pub fn update_death_animation(&mut self, delta_time: f32) -> bool {
+        let PlayerState::Dying(mut anim) = self.state else {
+            return false;
+        };
+        if !anim.done {
+            anim.timer += delta_time;
+            if anim.timer >= DEATH_FRAME_DURATION {
+                anim.timer -= DEATH_FRAME_DURATION;
+                if anim.frame < DEATH_FRAMES - 1 {
+                    anim.frame += 1;
+                } else {
+                    anim.done = true;
+                }
             }
+            self.state = PlayerState::Dying(anim);
         }
+        anim.done
     }
 
     /// Begin the exit sequence towards the door at `(target_x, target_y)`. The
     /// player walks into the middle of the door (landing first if airborne),
-    /// then plays the "stepping inside" animation. No-op if already exiting.
+    /// then plays the "stepping inside" animation. No-op unless he is alive.
     pub fn start_exit(&mut self, target_x: f32, target_y: f32) {
-        if self.is_exiting {
+        if !matches!(self.state, PlayerState::Alive) {
             return;
         }
-        self.is_exiting = true;
-        // If he is already on the ground he can walk straight in; otherwise he
-        // first falls to the door's base height.
-        self.exit_phase = if self.on_ground {
-            ExitPhase::Walking
-        } else {
-            ExitPhase::Landing
-        };
-        self.exit_target_x = target_x;
-        self.exit_target_y = target_y;
-        self.exit_frame = 0;
-        self.exit_anim_timer = 0.0;
-        self.exit_anim_done = false;
+        self.state = PlayerState::Exiting(ExitAnim {
+            // If he is already on the ground he can walk straight in; otherwise
+            // he first falls to the door's base height.
+            phase: if self.on_ground {
+                ExitPhase::Walking
+            } else {
+                ExitPhase::Landing
+            },
+            target: Vec2d::new(target_x, target_y),
+            frame: 0,
+            timer: 0.0,
+            done: false,
+        });
         // vel_x is intentionally kept: an airborne entry carries its horizontal
         // momentum through the fall (see the Landing phase).
     }
 
     /// Advance the exit sequence: land (if airborne), walk to the middle of the
-    /// door, then play the 3-frame "entering the door" animation. Sets
-    /// `exit_anim_done` once the final frame has been shown.
-    pub fn update_exit_animation(&mut self, delta_time: f32) {
-        if self.exit_anim_done {
-            return;
+    /// door, then play the 3-frame "entering the door" animation. Returns true
+    /// once the final frame has been shown (and keeps returning true after
+    /// that). Returns false when the player is not exiting at all.
+    pub fn update_exit_animation(&mut self, delta_time: f32) -> bool {
+        let PlayerState::Exiting(mut anim) = self.state else {
+            return false;
+        };
+        if anim.done {
+            return true;
         }
 
-        match self.exit_phase {
+        match anim.phase {
             ExitPhase::Landing => {
                 // Keep whatever horizontal momentum the jump had while falling to
                 // the door's base height, but stop the moment he reaches the
@@ -244,31 +302,29 @@ impl Player {
                 // have to walk back in.
                 let before_x = self.x;
                 self.x += self.vel_x * delta_time;
-                if (before_x - self.exit_target_x).signum()
-                    != (self.x - self.exit_target_x).signum()
-                {
-                    self.x = self.exit_target_x;
+                if (before_x - anim.target.x).signum() != (self.x - anim.target.x).signum() {
+                    self.x = anim.target.x;
                     self.vel_x = 0.0;
                 }
                 self.vel_y += GRAVITY * delta_time;
                 self.y += self.vel_y * delta_time;
-                if self.y >= self.exit_target_y {
-                    self.y = self.exit_target_y;
+                if self.y >= anim.target.y {
+                    self.y = anim.target.y;
                     self.vel_y = 0.0;
-                    self.exit_phase = ExitPhase::Walking;
+                    anim.phase = ExitPhase::Walking;
                 }
             }
             ExitPhase::Walking => {
                 // Step horizontally towards the door's middle at walking speed,
                 // playing the walk cycle, then begin the entering animation.
-                let dx = self.exit_target_x - self.x;
+                let dx = anim.target.x - self.x;
                 let step = PLAYER_SPEED * delta_time;
                 if dx.abs() <= step {
-                    self.x = self.exit_target_x;
+                    self.x = anim.target.x;
                     // Snap flush onto the door base (the ground rest position can
                     // sit a pixel off) so the entering animation is centred.
-                    self.y = self.exit_target_y;
-                    self.exit_phase = ExitPhase::Entering;
+                    self.y = anim.target.y;
+                    anim.phase = ExitPhase::Entering;
                     self.frame = 0;
                     self.frame_time = 0.0;
                 } else {
@@ -278,17 +334,20 @@ impl Player {
                 }
             }
             ExitPhase::Entering => {
-                self.exit_anim_timer += delta_time;
-                if self.exit_anim_timer >= EXIT_FRAME_DURATION {
-                    self.exit_anim_timer -= EXIT_FRAME_DURATION;
-                    if self.exit_frame < EXIT_FRAMES - 1 {
-                        self.exit_frame += 1;
+                anim.timer += delta_time;
+                if anim.timer >= EXIT_FRAME_DURATION {
+                    anim.timer -= EXIT_FRAME_DURATION;
+                    if anim.frame < EXIT_FRAMES - 1 {
+                        anim.frame += 1;
                     } else {
-                        self.exit_anim_done = true;
+                        anim.done = true;
                     }
                 }
             }
         }
+
+        self.state = PlayerState::Exiting(anim);
+        anim.done
     }
 
     pub fn update(&mut self, input: &InputState, tilemap: &mut TileMap, delta_time: f32) {
@@ -381,7 +440,7 @@ impl Player {
         self.handle_platforms(tilemap, delta_time);
 
         // Clamp player to level bounds
-        let level_width = (tilemap.width as f32) * (tilemap.tile_size as f32);
+        let level_width = tilemap.width as f32 * TILE_SIZE;
         self.x = self.x.max(0.0).min(level_width - self.width as f32);
 
         // Jump logic (after collision so we know if we just landed)
@@ -442,7 +501,7 @@ impl Player {
             Vec2d::new(self.width as f32, self.height as f32),
         );
         tilemap.platforms().any(|platform| {
-            platform.active
+            platform.is_active()
                 && platform.vel_x.abs() > 0.01
                 && !near_platform_top(y + self.height as f32, platform.y)
                 && player_rect.intersects(&platform.rect())
@@ -461,7 +520,7 @@ impl Player {
             Vec2d::new(self.width as f32, self.height as f32),
         );
         tilemap.platforms().any(|platform| {
-            platform.active
+            platform.is_active()
                 && platform.vel_y > 0.0
                 && platform.y <= y
                 && player_rect.intersects(&platform.rect())
@@ -479,7 +538,7 @@ impl Player {
     /// ground (not a platform) is helping hold him up. A player still propped up
     /// by solid ground while stepping onto a platform hasn't committed to it yet.
     fn on_solid_ground(&self, tilemap: &TileMap) -> bool {
-        let tile_size = tilemap.tile_size as f32;
+        let tile_size = TILE_SIZE;
         // Probe the tile row immediately beneath the player's feet
         let tile_y = ((self.y + self.height as f32) / tile_size).floor() as i32;
         let left_tile = (self.x / tile_size).floor() as i32;
@@ -569,8 +628,8 @@ impl Player {
 
         // Check if any corner is inside a solid tile
         for &(corner_x, corner_y) in &corners {
-            let tile_x = (corner_x / tilemap.tile_size as f32).floor() as i32;
-            let tile_y = (corner_y / tilemap.tile_size as f32).floor() as i32;
+            let tile_x = (corner_x / TILE_SIZE).floor() as i32;
+            let tile_y = (corner_y / TILE_SIZE).floor() as i32;
 
             if tilemap.is_solid(tile_x, tile_y) {
                 return true;
@@ -613,10 +672,11 @@ impl Player {
 
         // Touch all tiles the player overlaps or is standing on
         // Don't subtract 1 here so we include tiles the player is exactly touching
-        let top_tile = player_top / tilemap.tile_size as i32;
-        let bottom_tile = player_bottom / tilemap.tile_size as i32;
-        let left_tile = player_left / tilemap.tile_size as i32;
-        let right_tile = player_right / tilemap.tile_size as i32;
+        let tile_size = TILE_SIZE as i32;
+        let top_tile = player_top / tile_size;
+        let bottom_tile = player_bottom / tile_size;
+        let left_tile = player_left / tile_size;
+        let right_tile = player_right / tile_size;
 
         for ty in top_tile..=bottom_tile {
             for tx in left_tile..=right_tile {
@@ -625,7 +685,40 @@ impl Player {
         }
     }
 
+    /// Resolve all interactions with moving platforms and path blocks for this
+    /// frame, in order: activate/ride the platform under the feet, take a
+    /// horizontal push from a platform at the side, then take a downward push
+    /// from a block overhead. Any of the pushes can crush (kill) the player,
+    /// which ends the handling for the frame.
     fn handle_platforms(&mut self, tilemap: &mut TileMap, delta_time: f32) {
+        let contacts = self.scan_platform_contacts(tilemap);
+
+        // Activate platform if needed (outside the scan to avoid borrow issues)
+        if let Some((px, py)) = contacts.activate {
+            tilemap.activate_platform(px, py);
+        }
+
+        if let Some(push_vel_x) = contacts.side_push {
+            self.take_side_push(push_vel_x, tilemap, delta_time);
+            if self.is_dead() {
+                return;
+            }
+        }
+
+        if let Some((vel_x, platform_top)) = contacts.riding {
+            self.ride_platform(vel_x, platform_top, tilemap, delta_time);
+            if self.is_dead() {
+                return;
+            }
+        }
+
+        self.take_overhead_push(tilemap);
+    }
+
+    /// One pass over all platforms, classifying how each touches the player.
+    /// The scan stops at the first platform the player is riding; a side push
+    /// found before it is kept.
+    fn scan_platform_contacts(&self, tilemap: &TileMap) -> PlatformContacts {
         let player_left = self.x;
         let player_right = self.x + self.width as f32;
         let player_top = self.y;
@@ -636,11 +729,7 @@ impl Player {
         // player has somewhere else to stand and hasn't committed to it.
         let supported_by_ground = self.on_solid_ground(tilemap);
 
-        // Check if player is standing on any platform
-        let mut platform_to_activate: Option<(i32, i32)> = None;
-        // (vel_x, platform_top) of the platform the player is riding
-        let mut riding: Option<(f32, f32)> = None;
-        let mut platform_push: Option<f32> = None; // Horizontal push from platform beside player
+        let mut contacts = PlatformContacts::default();
 
         for platform in tilemap.platforms() {
             // Check if player's feet are touching the top of the platform
@@ -649,21 +738,21 @@ impl Player {
                 // entirely on top, or as soon as it is his only support (he is
                 // not also resting on solid ground) - otherwise a player still
                 // straddling solid ground keeps it dormant until fully aboard.
-                if !platform.active
+                if !platform.is_active()
                     && (self.fully_on_platform(platform) || !supported_by_ground)
                 {
-                    let px = (platform.x / tilemap.tile_size as f32) as i32;
-                    let py = (platform.y / tilemap.tile_size as f32) as i32;
-                    platform_to_activate = Some((px, py));
+                    let px = (platform.x / TILE_SIZE) as i32;
+                    let py = (platform.y / TILE_SIZE) as i32;
+                    contacts.activate = Some((px, py));
                 }
 
                 // Store platform info to move player
-                riding = Some((platform.vel_x, platform.y));
+                contacts.riding = Some((platform.vel_x, platform.y));
                 break;
             }
 
             // Check if horizontally moving platform is beside the player and should push them
-            if platform.active && platform.vel_x.abs() > 0.01 {
+            if platform.is_active() && platform.vel_x.abs() > 0.01 {
                 let platform_rect = platform.rect();
                 let platform_left = platform_rect.position.x;
                 let platform_right = platform_rect.position.x + platform_rect.size.x;
@@ -678,81 +767,80 @@ impl Player {
                         && platform_right >= player_left - 2.0
                         && platform_right <= player_left + 2.0
                     {
-                        platform_push = Some(platform.vel_x);
+                        contacts.side_push = Some(platform.vel_x);
                     }
                     // Platform moving left, check if it's to the right of player
                     else if platform.vel_x < 0.0
                         && platform_left <= player_right + 2.0
                         && platform_left >= player_right - 2.0
                     {
-                        platform_push = Some(platform.vel_x);
+                        contacts.side_push = Some(platform.vel_x);
                     }
                 }
             }
         }
 
-        // Activate platform if needed (outside the loop to avoid borrow issues)
-        if let Some((px, py)) = platform_to_activate {
-            tilemap.activate_platform(px, py);
-        }
+        contacts
+    }
 
-        // Handle platform pushing from the side
-        if let Some(push_vel_x) = platform_push {
-            let move_x = push_vel_x * delta_time;
+    /// Shoved sideways by a horizontally moving platform. Being squeezed into
+    /// a wall crushes (kills) the player.
+    fn take_side_push(&mut self, push_vel_x: f32, tilemap: &TileMap, delta_time: f32) {
+        let new_x = self.x + push_vel_x * delta_time;
+        if self.check_collision_at(new_x, self.y, tilemap) {
+            // Platform squeezing player into a wall = crush death
+            self.kill();
+        } else {
+            self.x = new_x;
+        }
+    }
+
+    /// Carried by the platform under the player's feet: follow it horizontally
+    /// and keep the feet snapped to its top. Being squeezed into solid ground
+    /// above crushes (kills) the player.
+    fn ride_platform(&mut self, vel_x: f32, platform_top: f32, tilemap: &TileMap, delta_time: f32) {
+        // Try horizontal movement
+        let move_x = vel_x * delta_time;
+        if move_x.abs() > 0.01 {
             let new_x = self.x + move_x;
             if self.check_collision_at(new_x, self.y, tilemap) {
-                // Platform squeezing player into a wall = crush death
-                self.is_dead = true;
-                return;
+                // Platform is pushing player into obstacle - resolve to edge
+                self.x = self.resolve_x_position(new_x, tilemap);
             } else {
                 self.x = new_x;
             }
         }
 
-        // Move player with platform - platform carries the player
-        if let Some((vel_x, platform_top)) = riding {
-            let move_x = vel_x * delta_time;
-
-            // Try horizontal movement
-            if move_x.abs() > 0.01 {
-                let new_x = self.x + move_x;
-                if self.check_collision_at(new_x, self.y, tilemap) {
-                    // Platform is pushing player into obstacle - resolve to edge
-                    self.x = self.resolve_x_position(new_x, tilemap);
-                } else {
-                    self.x = new_x;
-                }
+        // Vertical carry: the platform already moved this frame (the tilemap
+        // updates before the player), so place the player's feet directly on
+        // its top instead of integrating the platform velocity. Gravity must
+        // also be cancelled here - the platform never registers as a vertical
+        // collision while riding (the feet_on_top exception), so vel_y would
+        // otherwise grow each frame until the player sinks out of the riding
+        // tolerance and gets trapped inside upward-moving platforms.
+        let snap_y = platform_top - self.height as f32;
+        if self.check_collision_at(self.x, snap_y, tilemap) {
+            // Upward-moving platform squeezing player into solid above = crush death
+            if snap_y < self.y {
+                self.kill();
+                return;
             }
-
-            // Vertical carry: the platform already moved this frame (the tilemap
-            // updates before the player), so place the player's feet directly on
-            // its top instead of integrating the platform velocity. Gravity must
-            // also be cancelled here - the platform never registers as a vertical
-            // collision while riding (the feet_on_top exception), so vel_y would
-            // otherwise grow each frame until the player sinks out of the riding
-            // tolerance and gets trapped inside upward-moving platforms.
-            let snap_y = platform_top - self.height as f32;
-            if self.check_collision_at(self.x, snap_y, tilemap) {
-                // Upward-moving platform squeezing player into solid above = crush death
-                if snap_y < self.y {
-                    self.is_dead = true;
-                    return;
-                }
-                // Platform is pushing player into obstacle - resolve to edge
-                self.y = self.resolve_y_position(self.x, snap_y, tilemap);
-            } else {
-                self.y = snap_y;
-            }
-            self.vel_y = 0.0;
+            // Platform is pushing player into obstacle - resolve to edge
+            self.y = self.resolve_y_position(self.x, snap_y, tilemap);
+        } else {
+            self.y = snap_y;
         }
+        self.vel_y = 0.0;
+    }
 
-        // A downward-moving block pressing on the player from above. The block
-        // can never hold him up: it shoves him down while it descends faster
-        // than he is falling, and otherwise he simply falls away from it under
-        // gravity - whichever is the greater downward motion wins. If solid
-        // support sits beneath him so he cannot be pushed clear, he is crushed.
+    /// A downward-moving block pressing on the player from above. The block
+    /// can never hold him up: it shoves him down while it descends faster
+    /// than he is falling, and otherwise he simply falls away from it under
+    /// gravity - whichever is the greater downward motion wins. If solid
+    /// support sits beneath him so he cannot be pushed clear, he is crushed.
+    fn take_overhead_push(&mut self, tilemap: &TileMap) {
         for platform in tilemap.platforms() {
-            if !platform.active || platform.vel_y <= 0.0 {
+            if !platform.is_active() || platform.vel_y <= 0.0 {
                 continue;
             }
             let rect = platform.rect();
@@ -769,7 +857,7 @@ impl Player {
                 // Push him down flush with the block's underside, unless solid
                 // ground blocks the way - then he is crushed against it.
                 if self.check_collision_at(self.x, block_bottom, tilemap) {
-                    self.is_dead = true;
+                    self.kill();
                     return;
                 }
                 self.y = block_bottom;
@@ -794,15 +882,7 @@ impl Player {
         self.frame = 0;
         self.frame_time = 0.0;
         self.facing_right = true;
-        self.is_dead = false;
-        self.death_frame = 0;
-        self.death_anim_timer = 0.0;
-        self.death_anim_done = false;
-        self.is_exiting = false;
-        self.exit_phase = ExitPhase::Walking;
-        self.exit_frame = 0;
-        self.exit_anim_timer = 0.0;
-        self.exit_anim_done = false;
+        self.state = PlayerState::Alive;
     }
 
     pub fn render(
@@ -812,13 +892,20 @@ impl Player {
         camera_x: i32,
         camera_y: i32,
     ) {
-        let (src_x, src_y) = if self.is_exiting && self.exit_phase == ExitPhase::Entering {
+        let (src_x, src_y) = match self.state {
             // Third sprite-sheet row: the "stepping into the door" frames.
-            ((self.exit_frame * self.width as usize) as i32, (self.height * 2) as i32)
-        } else if self.is_dead {
-            ((self.death_frame * self.width as usize) as i32, self.height as i32)
-        } else {
-            ((self.frame * self.width as usize) as i32, 0)
+            PlayerState::Exiting(anim) if anim.phase == ExitPhase::Entering => (
+                (anim.frame * self.width as usize) as i32,
+                (self.height * 2) as i32,
+            ),
+            // Second row: the death frames.
+            PlayerState::Dying(anim) => (
+                (anim.frame * self.width as usize) as i32,
+                self.height as i32,
+            ),
+            // First row: idle/walk frames (also used while landing at or
+            // walking towards a door during the exit sequence).
+            _ => ((self.frame * self.width as usize) as i32, 0),
         };
         let src_rect = sdl2::rect::Rect::new(src_x, src_y, self.width, self.height);
 
@@ -877,8 +964,9 @@ mod tests {
 
         let dt = 1.0 / 60.0;
         let mut started_walking = false;
+        let mut finished = false;
         for _ in 0..600 {
-            player.update_exit_animation(dt);
+            finished = player.update_exit_animation(dt);
 
             // The instant he first moves horizontally he must already be at the
             // door's base height (i.e. he landed first).
@@ -892,13 +980,13 @@ mod tests {
                 assert!(player.facing_right, "should face towards the door");
             }
 
-            if player.exit_anim_done {
+            if finished {
                 break;
             }
         }
 
         assert!(started_walking, "player never walked towards the door");
-        assert!(player.exit_anim_done, "exit animation never finished");
+        assert!(finished, "exit animation never finished");
         assert!(
             (player.x - target_x).abs() < 0.001 && (player.y - target_y).abs() < 0.001,
             "player should finish flush with the door ({}, {})",
@@ -933,13 +1021,13 @@ mod tests {
 
         // He must never overshoot the door's middle while drifting.
         for _ in 0..600 {
-            player.update_exit_animation(dt);
+            let done = player.update_exit_animation(dt);
             assert!(
                 player.x <= target_x + 0.001,
                 "drift should stop at the door middle, not overshoot (x = {})",
                 player.x
             );
-            if player.exit_anim_done {
+            if done {
                 break;
             }
         }
@@ -1041,7 +1129,7 @@ mod tests {
             tilemap.update(dt);
             player.update(&input, &mut tilemap, dt);
             assert!(
-                !player.is_dead,
+                !player.is_dead(),
                 "player must not die when a descending block pushes him in mid-air \
                  (player at y = {})",
                 player.y
@@ -1141,7 +1229,7 @@ mod tests {
                 player.update(&input, &mut tilemap, dt);
                 let gap = player.y - block_bottom; // player's top below the block
 
-                assert!(!player.is_dead, "hold={hold_jump} frame {frame}: must not die");
+                assert!(!player.is_dead(), "hold={hold_jump} frame {frame}: must not die");
                 // The upward jump is gone immediately and never returns.
                 assert!(
                     player.vel_y >= -0.01,
