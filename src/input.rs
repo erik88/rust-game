@@ -13,6 +13,9 @@ pub struct InputState {
     pub right: bool,
     pub jump: bool,
     pub jump_pressed: bool,
+    /// Held run modifier: horizontal speed builds toward a higher top speed
+    /// instead of being pinned at walking pace. See [`crate::player`].
+    pub run: bool,
 }
 
 impl InputState {
@@ -58,6 +61,8 @@ pub struct SdlInput {
     keyboard_jump: bool,
     pad_jump: bool,
     prev_jump: bool,
+    keyboard_run: bool,
+    pad_run: bool,
     quit: bool,
 }
 
@@ -73,6 +78,8 @@ impl SdlInput {
             keyboard_jump: false,
             pad_jump: false,
             prev_jump: false,
+            keyboard_run: false,
+            pad_run: false,
             quit: false,
         }
     }
@@ -93,6 +100,7 @@ impl InputSource for SdlInput {
                     Keycode::Left | Keycode::A => self.keyboard.left = true,
                     Keycode::Right | Keycode::D => self.keyboard.right = true,
                     Keycode::Space => self.keyboard_jump = true,
+                    Keycode::LShift | Keycode::RShift => self.keyboard_run = true,
                     _ => {}
                 },
                 Event::KeyUp {
@@ -101,6 +109,7 @@ impl InputSource for SdlInput {
                     Keycode::Left | Keycode::A => self.keyboard.left = false,
                     Keycode::Right | Keycode::D => self.keyboard.right = false,
                     Keycode::Space => self.keyboard_jump = false,
+                    Keycode::LShift | Keycode::RShift => self.keyboard_run = false,
                     _ => {}
                 },
                 Event::ControllerDeviceAdded { which, .. } => {
@@ -116,6 +125,10 @@ impl InputSource for SdlInput {
                     Button::DPadRight => self.dpad.right = true,
                     // A/B (or X/Y) all jump, so the binding feels natural on any layout.
                     Button::A | Button::B | Button::X | Button::Y => self.pad_jump = true,
+                    // The face buttons are all taken by jump, so run lives on
+                    // the shoulders — either one, so it works left- or
+                    // right-handed.
+                    Button::LeftShoulder | Button::RightShoulder => self.pad_run = true,
                     Button::Start => self.quit = true,
                     _ => {}
                 },
@@ -123,6 +136,7 @@ impl InputSource for SdlInput {
                     Button::DPadLeft => self.dpad.left = false,
                     Button::DPadRight => self.dpad.right = false,
                     Button::A | Button::B | Button::X | Button::Y => self.pad_jump = false,
+                    Button::LeftShoulder | Button::RightShoulder => self.pad_run = false,
                     _ => {}
                 },
                 Event::ControllerAxisMotion {
@@ -144,6 +158,7 @@ impl InputSource for SdlInput {
             jump,
             // Edge-detect a jump press across all sources.
             jump_pressed: jump && !self.prev_jump,
+            run: self.keyboard_run || self.pad_run,
         };
         self.prev_jump = jump;
         state

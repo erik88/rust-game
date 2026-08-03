@@ -79,6 +79,15 @@ pub const PLAYER_WIDTH: u32 = 16;
 pub const PLAYER_HEIGHT: u32 = 38;
 
 const PLAYER_SPEED: f32 = 150.0;
+// Top speed while the run button is held. Starting, stopping and turning stay
+// instant at PLAYER_SPEED; only the stretch above walking pace ramps, so the
+// character keeps its tight feel and running adds momentum on top rather than
+// replacing the handling.
+const RUN_SPEED: f32 = 260.0;
+// Build-up is slower than bleed-off, so reaching top speed feels earned but
+// letting go hands control straight back.
+const RUN_ACCELERATION: f32 = 500.0;
+const RUN_DECELERATION: f32 = 800.0;
 const JUMP_SPEED: f32 = 400.0;
 const GRAVITY: f32 = 1200.0;
 const JUMP_HOLD_GRAVITY: f32 = 800.0; // Reduced gravity while holding jump
@@ -355,15 +364,36 @@ impl Player {
         // Store previous ground state
         self.was_on_ground = self.on_ground;
 
-        // Horizontal movement
-        self.vel_x = 0.0;
+        // Horizontal movement. Releasing the stick still stops dead, and both
+        // directions at once still resolves to right, exactly as before.
         if input.left {
-            self.vel_x = -PLAYER_SPEED;
             self.facing_right = false;
         }
         if input.right {
-            self.vel_x = PLAYER_SPEED;
             self.facing_right = true;
+        }
+        let direction = if input.right {
+            1.0
+        } else if input.left {
+            -1.0
+        } else {
+            0.0
+        };
+
+        if direction == 0.0 {
+            self.vel_x = 0.0;
+        } else {
+            let target = if input.run { RUN_SPEED } else { PLAYER_SPEED };
+            // Speed measured along the direction being held. A standing start
+            // reads as zero and a turn reads as negative, so both floor to
+            // walking pace and the character never slides through a reversal.
+            let speed = (self.vel_x * direction).max(PLAYER_SPEED);
+            let speed = if speed < target {
+                (speed + RUN_ACCELERATION * delta_time).min(target)
+            } else {
+                (speed - RUN_DECELERATION * delta_time).max(target)
+            };
+            self.vel_x = direction * speed;
         }
 
         // Variable jump height: if player releases jump while going up, cut the jump short
@@ -458,7 +488,11 @@ impl Player {
 
     fn update_animation(&mut self, delta_time: f32) {
         if self.vel_x.abs() > 0.1 && self.on_ground {
-            self.step_walk_animation(delta_time);
+            // Cycle the legs in proportion to ground speed, so a run doesn't
+            // read as a moonwalk. Scaled here rather than inside
+            // `step_walk_animation` because the exit animation drives that
+            // directly while moving the player without touching `vel_x`.
+            self.step_walk_animation(delta_time * self.vel_x.abs() / PLAYER_SPEED);
         } else {
             // Frame 0 is idle
             self.frame = 0;
@@ -937,6 +971,7 @@ mod tests {
     use crate::input::InputState;
     use crate::level::LevelData;
     use crate::tiles;
+    use crate::time::FIXED_DT;
 
     /// Build a 10x10 level of open air with a single right-moving platform
     /// (tile 10) occupying tile (2, 2) — its rect spans x in [80, 120],
@@ -947,6 +982,146 @@ mod tests {
         let mut tilemap = TileMap::from_data(grid);
         tilemap.activate_platform(2, 2);
         tilemap
+    }
+
+    /// A player standing on a wide strip of solid ground with open air above,
+    /// for testing horizontal movement with nothing to collide with.
+    fn standing() -> (Player, TileMap) {
+        let mut grid = vec![vec![tiles::EMPTY; 40]; 12];
+        grid[4] = vec![tiles::SOLID; 40];
+        (Player::new(400.0, 122.0), TileMap::from_data(grid))
+    }
+
+    /// Hold right (optionally with run) for `frames` and return the new `vel_x`.
+    fn hold_right(frames: usize, run: bool, player: &mut Player, tilemap: &mut TileMap) -> f32 {
+        let input = InputState {
+            right: true,
+            run,
+            ..Default::default()
+        };
+        for _ in 0..frames {
+            player.update(&input, tilemap, FIXED_DT);
+        }
+        player.vel_x
+    }
+
+    #[test]
+    fn walking_is_unchanged_when_run_is_not_held() {
+        // Whatever the run mechanic does, plain walking must still be the flat
+        // instant-on PLAYER_SPEED the existing levels were built around.
+        for frames in [1, 2, 10, 120] {
+            let (mut player, mut tilemap) = standing();
+            assert_eq!(
+                hold_right(frames, false, &mut player, &mut tilemap),
+                PLAYER_SPEED
+            );
+        }
+    }
+
+    #[test]
+    fn holding_run_builds_speed_and_caps_at_run_speed() {
+        let (mut player, mut tilemap) = standing();
+
+        // The first frame is walking pace plus one step of acceleration, so the
+        // character responds instantly rather than easing up from a standstill.
+        let first = hold_right(1, true, &mut player, &mut tilemap);
+        assert!(
+            first > PLAYER_SPEED && first < PLAYER_SPEED + 20.0,
+            "run should start from walking pace, got {first}"
+        );
+
+        // It converges on RUN_SPEED and never overshoots.
+        assert_eq!(hold_right(120, true, &mut player, &mut tilemap), RUN_SPEED);
+    }
+
+    #[test]
+    fn reaching_top_speed_takes_about_a_fifth_of_a_second() {
+        // Long enough that the build-up reads as momentum, short enough to be
+        // usable in a corridor. Guards the tuning against accidental edits.
+        let frames_to_top = (1..=200)
+            .find(|&f| {
+                let (mut player, mut tilemap) = standing();
+                hold_right(f, true, &mut player, &mut tilemap) >= RUN_SPEED
+            })
+            .expect("should reach top speed");
+        let secs = frames_to_top as f32 * FIXED_DT;
+        assert!(
+            (0.15..=0.30).contains(&secs),
+            "time to top speed was {secs}s"
+        );
+    }
+
+    #[test]
+    fn releasing_run_bleeds_back_down_to_walking_speed() {
+        let (mut player, mut tilemap) = standing();
+        hold_right(120, true, &mut player, &mut tilemap);
+
+        // Speed comes off over several frames rather than snapping, so letting
+        // go of run keeps the momentum readable.
+        let after_one = hold_right(1, false, &mut player, &mut tilemap);
+        assert!(
+            after_one > PLAYER_SPEED && after_one < RUN_SPEED,
+            "expected a gradual bleed, got {after_one}"
+        );
+        assert_eq!(
+            hold_right(120, false, &mut player, &mut tilemap),
+            PLAYER_SPEED
+        );
+    }
+
+    #[test]
+    fn turning_around_while_running_snaps_to_walking_speed() {
+        let (mut player, mut tilemap) = standing();
+        assert_eq!(hold_right(120, true, &mut player, &mut tilemap), RUN_SPEED);
+
+        // A reversal must not carry the run's momentum through the turn, or the
+        // character would skate past the spot the player aimed at. Run is still
+        // held here, so the new direction restarts from walking pace and begins
+        // building again — it must not inherit the old direction's top speed.
+        let input = InputState {
+            left: true,
+            run: true,
+            ..Default::default()
+        };
+        player.update(&input, &mut tilemap, FIXED_DT);
+        assert!(
+            player.vel_x < 0.0 && player.vel_x.abs() < PLAYER_SPEED + 20.0,
+            "turn should restart from walking pace, got {}",
+            player.vel_x
+        );
+    }
+
+    #[test]
+    fn releasing_the_direction_still_stops_dead_even_at_run_speed() {
+        let (mut player, mut tilemap) = standing();
+        hold_right(120, true, &mut player, &mut tilemap);
+
+        player.update(&InputState::default(), &mut tilemap, FIXED_DT);
+        assert_eq!(player.vel_x, 0.0);
+    }
+
+    #[test]
+    fn the_run_ramp_is_expressed_per_second_not_per_frame() {
+        // Physics is pinned to FIXED_DT today, but the ramp must not silently
+        // depend on that the way the jump-cut damping does.
+        let sample = |dt: f32| {
+            let (mut player, mut tilemap) = standing();
+            let input = InputState {
+                right: true,
+                run: true,
+                ..Default::default()
+            };
+            for _ in 0..(0.1 / dt).round() as usize {
+                player.update(&input, &mut tilemap, dt);
+            }
+            player.vel_x
+        };
+        let coarse = sample(1.0 / 60.0);
+        let fine = sample(1.0 / 240.0);
+        assert!(
+            (coarse - fine).abs() < 1.0,
+            "ramp differed with step size: {coarse} vs {fine}"
+        );
     }
 
     /// An airborne player who reaches a door must first fall to the door's base

@@ -2,6 +2,19 @@
 
 A small 2D platform game built with Rust and SDL2.
 
+## Controls
+
+| Action | Keyboard | Controller |
+| --- | --- | --- |
+| Move | Arrow keys or `A`/`D` | D-pad or left stick |
+| Jump | `Space` | `A`/`B`/`X`/`Y` |
+| Run | Hold `Shift` | Hold either shoulder button |
+| Quit | `Esc` | `Start` |
+
+Holding jump gives a higher jump; releasing it early cuts the jump short.
+Holding run builds horizontal speed up to a higher top speed and bleeds it back
+off when released — starting, stopping and turning stay instant either way.
+
 ## Development
 
 ### Prerequisites
