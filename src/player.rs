@@ -93,7 +93,8 @@ const EXIT_FRAMES: usize = 3;
 // Vertical tolerance for treating the player's feet as standing on a platform.
 // Platforms move before the player each frame, so this must exceed the distance
 // a platform travels in one frame (100 px/s * delta_time), or the player loses
-// his footing on a slow frame and the platform passes through him.
+// his footing on a slow frame and the platform passes through him. `time`'s
+// MAX_DELTA caps delta_time at 50 ms to keep that true (100 * 0.05 = 5 px).
 const PLATFORM_RIDE_TOLERANCE: f32 = 6.0;
 
 /// True if feet at `player_bottom` are within riding tolerance of a

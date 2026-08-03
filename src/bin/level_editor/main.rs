@@ -106,9 +106,12 @@ fn main() -> Result<(), String> {
         .build()
         .map_err(|e| e.to_string())?;
 
+    // See the matching comment in the game's `main`: vsync stops tearing and
+    // paces the loop against the display instead of a free-running timer.
     let mut canvas = window
         .into_canvas()
         .accelerated()
+        .present_vsync()
         .build()
         .map_err(|e| e.to_string())?;
 

@@ -4,11 +4,11 @@
 #![cfg_attr(all(target_os = "windows", not(debug_assertions)), windows_subsystem = "windows")]
 
 use rustgamex::engine::{GameEngine, OnDeath};
-use rustgamex::input::{InputSource, SdlInput};
+use rustgamex::input::{InputSource, InputState, SdlInput};
 use rustgamex::level;
 use rustgamex::texture::load_png_texture;
 use rustgamex::tiles::TILE_SIZE;
-use rustgamex::time::{RealTime, TimeProvider};
+use rustgamex::time::{FIXED_DT, FixedTimestep, RealTime, TimeProvider};
 use rustgamex::{SCREEN_HEIGHT, SCREEN_WIDTH};
 
 fn parse_args() -> (usize, String) {
@@ -66,10 +66,15 @@ fn main() -> Result<(), String> {
         .build()
         .map_err(|e| e.to_string())?;
 
-    // Create a canvas for rendering
+    // Create a canvas for rendering. `present_vsync` makes `canvas.present()`
+    // block until the display's next refresh, which both stops the frame from
+    // being torn mid-scanout and paces the loop in step with the panel — a
+    // software timer running free at 60 Hz drifts against the refresh and
+    // periodically shows a frame twice.
     let mut canvas = window
         .into_canvas()
         .accelerated()
+        .present_vsync()
         .build()
         .map_err(|e| e.to_string())?;
 
@@ -87,6 +92,13 @@ fn main() -> Result<(), String> {
 
     let mut input = SdlInput::new(sdl_context.event_pump()?, controller_subsystem);
     let mut time_provider = RealTime::new();
+    let mut timestep = FixedTimestep::new();
+    // Input is sampled once per rendered frame but physics runs on its own
+    // clock, so a frame can render without stepping at all (on a 120 Hz display
+    // that is every other frame). `jump_pressed` is a one-shot edge, and
+    // dropping it on such a frame would swallow the jump outright, so it is
+    // latched here until a step actually consumes it.
+    let mut pending_jump_pressed = false;
 
     // Keep the window title in sync with the current level's name
     set_window_title(&mut canvas, &engine);
@@ -100,8 +112,16 @@ fn main() -> Result<(), String> {
             break 'running;
         }
 
-        // Update game engine
-        engine.step(&input_state, delta_time);
+        // Update game engine on the fixed physics clock
+        pending_jump_pressed |= input_state.jump_pressed;
+        for _ in 0..timestep.steps_for(delta_time) {
+            let step_input = InputState {
+                jump_pressed: pending_jump_pressed,
+                ..input_state.clone()
+            };
+            engine.step(&step_input, FIXED_DT);
+            pending_jump_pressed = false;
+        }
 
         // Update the window title when the level changes
         if engine.current_level() != titled_level {

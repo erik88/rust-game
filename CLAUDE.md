@@ -41,6 +41,15 @@ Engine tests can be watched visually: `VISUALIZE_TEST=1 cargo test <name> --
   (`GameEngine::step`). Platform carry/push physics and several regression
   tests depend on this ordering; tests reproduce it manually as
   `tilemap.update(dt); player.update(...)`.
+- **Fixed physics step:** rendering runs at the display's refresh rate (the
+  canvas is built with `present_vsync`), but `GameEngine::step` is only ever
+  called with `time::FIXED_DT` (1/60), paid out by `time::FixedTimestep` from a
+  banked accumulator. Gravity is integrated with semi-implicit Euler and the
+  jump-cut damping in `player` is applied once per step, so both are step-size
+  dependent and were tuned at 60 Hz — passing a display-derived delta instead
+  changes jump height with the monitor. Input is sampled per rendered frame, so
+  one-shot edges like `jump_pressed` must be latched until a step consumes them
+  (see `main`), otherwise they are lost on frames that run no step.
 - The window size is `SCREEN_WIDTH`/`SCREEN_HEIGHT` in `src/lib.rs`; render
   culling and camera clamping derive from it.
 - Coin tiles must only be removed via `TileMap::collect_coins`, which keeps
