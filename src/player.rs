@@ -93,6 +93,19 @@ const GRAVITY: f32 = 1200.0;
 const JUMP_HOLD_GRAVITY: f32 = 800.0; // Reduced gravity while holding jump
 const JUMP_RELEASE_DAMPING: f32 = 0.5; // Velocity multiplier when jump is released
 const FRAME_DURATION: f32 = 0.25;
+// First frame of the side-walking cycle, held as the pose while rising.
+const JUMP_FRAME: usize = 1;
+// The falling pose lives in the top-right corner of the sheet. Its white cape
+// streams out behind the character, so the frame is wider than all the others:
+// only the drawn sprite grows, the collision box stays PLAYER_WIDTH.
+const FALL_SRC_X: i32 = 60;
+const FALL_FRAME_WIDTH: u32 = 20;
+// Distance from a frame's left edge to the centre of the head, for the normal
+// frames and for the wider falling one. The falling frame is placed by its head
+// rather than by its left edge, so the body stays over the collision box and
+// only the cape hangs off the side.
+const HEAD_CENTER_X: i32 = 7;
+const FALL_HEAD_CENTER_X: i32 = 11;
 const DEATH_FRAME_DURATION: f32 = 0.15;
 const DEATH_FRAMES: usize = 3;
 // Each "stepping into the door" frame plays for this long. Deliberately slower
@@ -487,7 +500,13 @@ impl Player {
     }
 
     fn update_animation(&mut self, delta_time: f32) {
-        if self.vel_x.abs() > 0.1 && self.on_ground {
+        if !self.on_ground {
+            // Airborne: hold the first walk frame (legs apart) as the jump
+            // pose. Once he starts dropping, `render` swaps in the falling
+            // pose instead, so the arc reads as rise-then-fall.
+            self.frame = JUMP_FRAME;
+            self.frame_time = 0.0;
+        } else if self.vel_x.abs() > 0.1 {
             // Cycle the legs in proportion to ground speed, so a run doesn't
             // read as a moonwalk. Scaled here rather than inside
             // `step_walk_animation` because the exit animation drives that
@@ -927,27 +946,57 @@ impl Player {
         camera_x: i32,
         camera_y: i32,
     ) {
-        let (src_x, src_y) = match self.state {
+        // The source frame, plus its width and the distance from its left edge
+        // to the centre of the head — the falling pose is wider than the rest,
+        // so those two can't be assumed to be the player's own.
+        let (src_x, src_y, frame_width, head_center) = match self.state {
             // Third sprite-sheet row: the "stepping into the door" frames.
             PlayerState::Exiting(anim) if anim.phase == ExitPhase::Entering => (
                 (anim.frame * self.width as usize) as i32,
                 (self.height * 2) as i32,
+                self.width,
+                HEAD_CENTER_X,
             ),
             // Second row: the death frames.
             PlayerState::Dying(anim) => (
                 (anim.frame * self.width as usize) as i32,
                 self.height as i32,
+                self.width,
+                HEAD_CENTER_X,
             ),
-            // First row: idle/walk frames (also used while landing at or
+            // Dropping (including the fall onto a door's base height): the wide
+            // top-right pose, cape trailing behind him.
+            _ if !self.on_ground && self.vel_y > 0.0 => {
+                (FALL_SRC_X, 0, FALL_FRAME_WIDTH, FALL_HEAD_CENTER_X)
+            }
+            // First row: idle/walk frames (also used while rising, and while
             // walking towards a door during the exit sequence).
-            _ => ((self.frame * self.width as usize) as i32, 0),
+            _ => (
+                (self.frame * self.width as usize) as i32,
+                0,
+                self.width,
+                HEAD_CENTER_X,
+            ),
         };
-        let src_rect = sdl2::rect::Rect::new(src_x, src_y, self.width, self.height);
+        let src_rect = sdl2::rect::Rect::new(src_x, src_y, frame_width, self.height);
 
+        // Line the drawn head up with where the head sits in a normal frame, so
+        // a wider frame adds cape without shifting the character off his
+        // collision box. `copy_ex` mirrors inside the destination rect, which
+        // puts the head `width - 1 - centre` from its left edge when facing
+        // left — and swings the cape over to the other side with it.
+        let head_offset = |width: u32, center: i32| {
+            if self.facing_right {
+                center
+            } else {
+                width as i32 - 1 - center
+            }
+        };
         let dst_rect = sdl2::rect::Rect::new(
-            self.x as i32 - camera_x,
+            self.x as i32 - camera_x + head_offset(self.width, HEAD_CENTER_X)
+                - head_offset(frame_width, head_center),
             self.y as i32 - camera_y,
-            self.width,
+            frame_width,
             self.height,
         );
 
