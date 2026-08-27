@@ -7,8 +7,8 @@ A small 2D platform game built with Rust and SDL2.
 | Action | Keyboard | Controller |
 | --- | --- | --- |
 | Move | Arrow keys or `A`/`D` | D-pad or left stick |
-| Jump | `Space` | `A`/`B`/`X`/`Y` |
-| Run | Hold `Shift` | Hold either shoulder button |
+| Jump | `Space` | `A` |
+| Run | Hold `Shift` | `B`/`X` |
 | Quit | `Esc` | `Start` |
 
 Holding jump gives a higher jump; releasing it early cuts the jump short.

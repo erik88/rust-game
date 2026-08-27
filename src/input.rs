@@ -114,7 +114,8 @@ impl InputSource for SdlInput {
                 },
                 Event::ControllerDeviceAdded { which, .. } => {
                     if let Ok(controller) = self.controller_subsystem.open(which) {
-                        self.controllers.insert(controller.instance_id(), controller);
+                        self.controllers
+                            .insert(controller.instance_id(), controller);
                     }
                 }
                 Event::ControllerDeviceRemoved { which, .. } => {
@@ -124,19 +125,19 @@ impl InputSource for SdlInput {
                     Button::DPadLeft => self.dpad.left = true,
                     Button::DPadRight => self.dpad.right = true,
                     // A/B (or X/Y) all jump, so the binding feels natural on any layout.
-                    Button::A | Button::B | Button::X | Button::Y => self.pad_jump = true,
+                    Button::A => self.pad_jump = true,
                     // The face buttons are all taken by jump, so run lives on
                     // the shoulders — either one, so it works left- or
                     // right-handed.
-                    Button::LeftShoulder | Button::RightShoulder => self.pad_run = true,
+                    Button::B | Button::X => self.pad_run = true,
                     Button::Start => self.quit = true,
                     _ => {}
                 },
                 Event::ControllerButtonUp { button, .. } => match button {
                     Button::DPadLeft => self.dpad.left = false,
                     Button::DPadRight => self.dpad.right = false,
-                    Button::A | Button::B | Button::X | Button::Y => self.pad_jump = false,
-                    Button::LeftShoulder | Button::RightShoulder => self.pad_run = false,
+                    Button::A => self.pad_jump = false,
+                    Button::B | Button::X => self.pad_run = false,
                     _ => {}
                 },
                 Event::ControllerAxisMotion {
