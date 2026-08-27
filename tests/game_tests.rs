@@ -1078,6 +1078,113 @@ mod tests {
         );
     }
 
+    /// Regression test: holding the jump button down must not bounce the
+    /// player. Once he lands, only a fresh press (a `jump_pressed` edge) may
+    /// jump again - a held button leaves him standing on the ground.
+    #[test]
+    fn test_holding_jump_does_not_bounce_on_landing() {
+        let player_start_y = 122.0;
+
+        #[rustfmt::skip]
+        let mut runner = TestRunner::new_with(
+            Player::new(5.0, player_start_y),
+            create_tilemap(vec![
+                vec![0],
+                vec![0],
+                vec![0],
+                vec![0],
+                vec![1],
+            ])
+        );
+
+        // Settle the player on the ground.
+        runner.run_frames(1);
+        assert!(runner.engine().player().on_ground);
+
+        // Press once on frame 1, then keep the button held for a long time -
+        // long enough to jump, land, and stay landed.
+        for frame in 1..=180 {
+            let mut input = InputState::new();
+            input.jump_pressed = frame == 1;
+            input.jump = true;
+            runner.queue_input(frame, input);
+        }
+
+        // Let the jump play out and land.
+        let mut landed_frame = None;
+        for frame in 1..=180 {
+            runner.run_frames(1);
+            if landed_frame.is_none() && runner.engine().player().on_ground {
+                landed_frame = Some(frame);
+                continue;
+            }
+            // After the first landing he must never leave the ground again,
+            // however long the button stays down.
+            if landed_frame.is_some() {
+                assert!(
+                    runner.engine().player().on_ground,
+                    "frame {frame}: holding jump re-jumped the player (y = {})",
+                    runner.engine().player().y
+                );
+            }
+        }
+
+        assert!(
+            landed_frame.is_some(),
+            "player never landed back on the ground"
+        );
+    }
+
+    /// Releasing and pressing again *does* jump: the fix above must not break
+    /// ordinary repeated jumping.
+    #[test]
+    fn test_releasing_and_pressing_jump_again_jumps() {
+        let player_start_y = 122.0;
+
+        #[rustfmt::skip]
+        let mut runner = TestRunner::new_with(
+            Player::new(5.0, player_start_y),
+            create_tilemap(vec![
+                vec![0],
+                vec![0],
+                vec![0],
+                vec![0],
+                vec![1],
+            ])
+        );
+
+        runner.run_frames(1);
+        assert!(runner.engine().player().on_ground);
+
+        // First jump, then let go and fall back down.
+        let mut input = InputState::new();
+        input.jump_pressed = true;
+        input.jump = true;
+        runner.queue_input(1, input);
+        runner.run_frames(1);
+        assert!(!runner.engine().player().on_ground, "first press should jump");
+
+        // Button released for the rest of the flight.
+        let mut frame = 2;
+        while !runner.engine().player().on_ground && frame < 200 {
+            runner.queue_input(frame, InputState::new());
+            runner.run_frames(1);
+            frame += 1;
+        }
+        assert!(runner.engine().player().on_ground, "player should have landed");
+
+        // A fresh press on the ground jumps again.
+        let mut input = InputState::new();
+        input.jump_pressed = true;
+        input.jump = true;
+        runner.queue_input(frame, input);
+        runner.run_frames(1);
+        assert!(
+            !runner.engine().player().on_ground,
+            "a fresh press after landing should jump again"
+        );
+    }
+
     #[test]
     fn test_downward_platform_stays_inactive_while_player_on_solid_ground() {
         // Solid ground at (0,1) butted up against a downward platform at (1,1).

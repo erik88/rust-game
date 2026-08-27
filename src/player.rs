@@ -61,7 +61,6 @@ pub struct Player {
     pub vel_x: f32,
     pub vel_y: f32,
     pub on_ground: bool,
-    was_on_ground: bool,
 
     state: PlayerState,
 
@@ -149,7 +148,6 @@ impl Player {
             vel_x: 0.0,
             vel_y: 0.0,
             on_ground: false,
-            was_on_ground: false,
             state: PlayerState::Alive,
             spawn_x: x,
             spawn_y: y,
@@ -374,9 +372,6 @@ impl Player {
     }
 
     pub fn update(&mut self, input: &InputState, tilemap: &mut TileMap, delta_time: f32) {
-        // Store previous ground state
-        self.was_on_ground = self.on_ground;
-
         // Horizontal movement. Releasing the stick still stops dead, and both
         // directions at once still resolves to right, exactly as before.
         if input.left {
@@ -487,11 +482,11 @@ impl Player {
         let level_width = tilemap.width as f32 * TILE_SIZE;
         self.x = self.x.max(0.0).min(level_width - self.width as f32);
 
-        // Jump logic (after collision so we know if we just landed)
-        let just_landed = !self.was_on_ground && self.on_ground;
+        // Jump logic (after collision so we know whether he is grounded)
 
-        // Jump if: just pressed jump while grounded, OR just landed while holding jump
-        if self.on_ground && (input.jump_pressed || (just_landed && input.jump)) {
+        // Only a fresh press jumps: holding the button down after landing must
+        // not bounce the player again, he has to release and press once more.
+        if self.on_ground && input.jump_pressed {
             self.vel_y = -JUMP_SPEED;
             self.on_ground = false;
         }
@@ -932,7 +927,6 @@ impl Player {
         self.vel_x = 0.0;
         self.vel_y = 0.0;
         self.on_ground = false;
-        self.was_on_ground = false;
         self.frame = 0;
         self.frame_time = 0.0;
         self.facing_right = true;
