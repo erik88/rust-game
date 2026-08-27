@@ -53,6 +53,17 @@ enum PlayerState {
     Exiting(ExitAnim),
 }
 
+/// Which ground cycle the moving frames are drawn from. Tracked rather than
+/// derived in `render` because the exit sequence walks the player towards a
+/// door without touching `vel_x`, so speed alone can't be trusted there.
+#[derive(Clone, Copy, PartialEq)]
+enum Gait {
+    /// The two-frame cycle in the death row's spare cells.
+    Walking,
+    /// The original, longer-strided cycle in the first row.
+    Running,
+}
+
 pub struct Player {
     pub x: f32,
     pub y: f32,
@@ -71,6 +82,7 @@ pub struct Player {
     // Animation
     frame: usize,
     frame_time: f32,
+    gait: Gait,
     facing_right: bool,
 }
 
@@ -92,8 +104,15 @@ const GRAVITY: f32 = 1200.0;
 const JUMP_HOLD_GRAVITY: f32 = 800.0; // Reduced gravity while holding jump
 const JUMP_RELEASE_DAMPING: f32 = 0.5; // Velocity multiplier when jump is released
 const FRAME_DURATION: f32 = 0.25;
-// First frame of the side-walking cycle, held as the pose while rising.
+// First frame of the running cycle, held as the pose while rising.
 const JUMP_FRAME: usize = 1;
+// The two walking frames sit in the death row's spare cells, just right of its
+// three frames; the running cycle is frames 1 and 2 of the first row. Frame 0
+// there is the idle pose, shared by both gaits.
+const WALK_SRC_X: i32 = (DEATH_FRAMES * PLAYER_WIDTH as usize) as i32;
+// Walking pins `vel_x` to exactly PLAYER_SPEED, so anything above it is the run
+// ramping in. The margin only absorbs float drift, not a real speed difference.
+const RUN_POSE_MARGIN: f32 = 1.0;
 // The falling pose lives in the top-right corner of the sheet. Its white cape
 // streams out behind the character, so the frame is wider than all the others:
 // only the drawn sprite grows, the collision box stays PLAYER_WIDTH.
@@ -159,6 +178,7 @@ impl Player {
             spawn_y: y,
             frame: 0,
             frame_time: 0.0,
+            gait: Gait::Walking,
             facing_right: true,
         }
     }
@@ -357,6 +377,8 @@ impl Player {
                 } else {
                     self.facing_right = dx > 0.0;
                     self.x += step.copysign(dx);
+                    // `step` is PLAYER_SPEED, so he strolls into the door.
+                    self.gait = Gait::Walking;
                     self.step_walk_animation(delta_time);
                 }
             }
@@ -502,12 +524,22 @@ impl Player {
 
     fn update_animation(&mut self, delta_time: f32) {
         if !self.on_ground {
-            // Airborne: hold the first walk frame (legs apart) as the jump
+            // Airborne: hold the first running frame (legs apart) as the jump
             // pose. Once he is dropping fast enough, `render` swaps in the
             // falling pose instead, so the arc reads as rise-then-fall.
+            self.gait = Gait::Running;
             self.frame = JUMP_FRAME;
             self.frame_time = 0.0;
         } else if self.vel_x.abs() > 0.1 {
+            // Pick the gait from how fast he is actually moving rather than
+            // from the run button: the run ramps in over PLAYER_SPEED, so his
+            // legs stay in step with his speed through the acceleration and
+            // through the coast back down after the button is let go.
+            self.gait = if self.vel_x.abs() > PLAYER_SPEED + RUN_POSE_MARGIN {
+                Gait::Running
+            } else {
+                Gait::Walking
+            };
             // Cycle the legs in proportion to ground speed, so a run doesn't
             // read as a moonwalk. Scaled here rather than inside
             // `step_walk_animation` because the exit animation drives that
@@ -935,8 +967,23 @@ impl Player {
         self.on_ground = false;
         self.frame = 0;
         self.frame_time = 0.0;
+        self.gait = Gait::Walking;
         self.facing_right = true;
         self.state = PlayerState::Alive;
+    }
+
+    /// Sprite-sheet position of the current body frame.
+    ///
+    /// The idle frame and the whole running cycle come from the first row; only
+    /// the two moving frames of a walk come from the walking cycle, which lives
+    /// in the death row's spare cells.
+    fn body_frame_src(&self) -> (i32, i32) {
+        let cell = |x: i32, frame: usize| x + (frame * self.width as usize) as i32;
+        if self.gait == Gait::Walking && self.frame > 0 {
+            (cell(WALK_SRC_X, self.frame - 1), self.height as i32)
+        } else {
+            (cell(0, self.frame), 0)
+        }
     }
 
     /// Whether the wide cape-trailing pose should be drawn.
@@ -980,14 +1027,12 @@ impl Player {
             _ if self.uses_fall_pose() => {
                 (FALL_SRC_X, 0, FALL_FRAME_WIDTH, FALL_HEAD_CENTER_X)
             }
-            // First row: idle/walk frames (also used while rising, and while
-            // walking towards a door during the exit sequence).
-            _ => (
-                (self.frame * self.width as usize) as i32,
-                0,
-                self.width,
-                HEAD_CENTER_X,
-            ),
+            // Idle, or one of the two ground cycles (also used while rising,
+            // and while walking towards a door during the exit sequence).
+            _ => {
+                let (src_x, src_y) = self.body_frame_src();
+                (src_x, src_y, self.width, HEAD_CENTER_X)
+            }
         };
         let src_rect = sdl2::rect::Rect::new(src_x, src_y, frame_width, self.height);
 
@@ -1032,6 +1077,108 @@ mod tests {
     use crate::level::LevelData;
     use crate::tiles;
     use crate::time::FIXED_DT;
+
+    /// Walking and running must draw from different cycles, and each frame of
+    /// each cycle must land on its own sprite-sheet cell.
+    #[test]
+    fn walking_and_running_use_separate_sprite_cycles() {
+        let mut player = Player::new(0.0, 0.0);
+        let w = PLAYER_WIDTH as i32;
+        let row1 = PLAYER_HEIGHT as i32;
+
+        // Idle is the shared first cell of the top row, whatever the gait.
+        for gait in [Gait::Walking, Gait::Running] {
+            player.gait = gait;
+            player.frame = 0;
+            assert_eq!(player.body_frame_src(), (0, 0), "idle must be shared");
+        }
+
+        // Running: frames 1 and 2 of the top row, exactly as before.
+        player.gait = Gait::Running;
+        player.frame = 1;
+        assert_eq!(player.body_frame_src(), (w, 0));
+        player.frame = 2;
+        assert_eq!(player.body_frame_src(), (2 * w, 0));
+
+        // Walking: the death row's two spare cells, right of its three frames.
+        player.gait = Gait::Walking;
+        player.frame = 1;
+        assert_eq!(player.body_frame_src(), (WALK_SRC_X, row1));
+        player.frame = 2;
+        assert_eq!(player.body_frame_src(), (WALK_SRC_X + w, row1));
+
+        // Those cells must start past the death frames and stay on the sheet.
+        assert_eq!(WALK_SRC_X, DEATH_FRAMES as i32 * w);
+        assert!(WALK_SRC_X + 2 * w <= 80, "walk cycle runs off the sheet");
+    }
+
+    /// The gait follows actual speed, not the run button: he keeps walking
+    /// legs until the run has actually ramped him past walking pace.
+    #[test]
+    fn gait_follows_speed_not_the_run_button() {
+        let mut tilemap = TileMap::from_data(vec![
+            vec![tiles::EMPTY; 10],
+            vec![tiles::SOLID; 10],
+        ]);
+        // Stand him on the solid row so he is grounded and can move.
+        let mut player = Player::new(16.0, TILE_SIZE - PLAYER_HEIGHT as f32);
+
+        let run_right = InputState {
+            right: true,
+            run: true,
+            ..InputState::new()
+        };
+        let walk_right = InputState {
+            right: true,
+            ..InputState::new()
+        };
+
+        // Settle on the ground.
+        player.update(&InputState::new(), &mut tilemap, FIXED_DT);
+        assert!(player.on_ground, "player should be standing on the ground");
+
+        // Plain walking never reaches the running cycle.
+        for _ in 0..30 {
+            player.update(&walk_right, &mut tilemap, FIXED_DT);
+            assert_eq!(player.vel_x, PLAYER_SPEED, "walking should pin vel_x");
+            assert!(player.gait == Gait::Walking, "walking used the run cycle");
+        }
+
+        // Holding run: the very first step is still at walking pace, so the
+        // legs must not snap to the run cycle before he has actually sped up.
+        player.update(&run_right, &mut tilemap, FIXED_DT);
+        assert!(
+            player.vel_x > PLAYER_SPEED,
+            "run should start ramping immediately"
+        );
+
+        // Once up to speed he is unambiguously running.
+        for _ in 0..30 {
+            player.update(&run_right, &mut tilemap, FIXED_DT);
+        }
+        assert_eq!(player.vel_x, RUN_SPEED, "should have reached top speed");
+        assert!(player.gait == Gait::Running, "running used the walk cycle");
+
+        // Letting go of run coasts back down, and the legs return to walking
+        // only once he is actually back at walking pace.
+        loop {
+            player.update(&walk_right, &mut tilemap, FIXED_DT);
+            if player.vel_x <= PLAYER_SPEED + RUN_POSE_MARGIN {
+                break;
+            }
+            assert!(
+                player.gait == Gait::Running,
+                "still faster than walking pace ({}), so the legs should run",
+                player.vel_x
+            );
+        }
+        assert_eq!(player.vel_x, PLAYER_SPEED);
+        assert!(player.gait == Gait::Walking, "should be walking again");
+
+        // Standing still falls back to the idle frame.
+        player.update(&InputState::new(), &mut tilemap, FIXED_DT);
+        assert_eq!(player.frame, 0, "idle frame expected when stopped");
+    }
 
     /// The cape pose must not flick out at the apex of the arc: a player who
     /// has only just started dropping still uses the rising pose, and the
