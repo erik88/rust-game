@@ -99,6 +99,12 @@ const JUMP_FRAME: usize = 1;
 // only the drawn sprite grows, the collision box stays PLAYER_WIDTH.
 const FALL_SRC_X: i32 = 60;
 const FALL_FRAME_WIDTH: u32 = 20;
+// How fast he must be dropping before the cape streams out. Swapping the pose
+// the instant `vel_y` turns positive makes the cape flick out at the apex of
+// every little hop; waiting for real downward speed keeps the rising pose
+// through the top of the arc and lets the cape catch as the fall builds. At
+// GRAVITY this is a touch over 0.1 s (and ~9 px) past the apex.
+const FALL_POSE_SPEED: f32 = 150.0;
 // Distance from a frame's left edge to the centre of the head, for the normal
 // frames and for the wider falling one. The falling frame is placed by its head
 // rather than by its left edge, so the body stays over the collision box and
@@ -497,8 +503,8 @@ impl Player {
     fn update_animation(&mut self, delta_time: f32) {
         if !self.on_ground {
             // Airborne: hold the first walk frame (legs apart) as the jump
-            // pose. Once he starts dropping, `render` swaps in the falling
-            // pose instead, so the arc reads as rise-then-fall.
+            // pose. Once he is dropping fast enough, `render` swaps in the
+            // falling pose instead, so the arc reads as rise-then-fall.
             self.frame = JUMP_FRAME;
             self.frame_time = 0.0;
         } else if self.vel_x.abs() > 0.1 {
@@ -933,6 +939,16 @@ impl Player {
         self.state = PlayerState::Alive;
     }
 
+    /// Whether the wide cape-trailing pose should be drawn.
+    ///
+    /// Not simply "moving downward": he has to be dropping at
+    /// `FALL_POSE_SPEED` before the cape catches, so the rising pose carries
+    /// through the apex of the arc instead of flicking over the moment
+    /// `vel_y` crosses zero.
+    fn uses_fall_pose(&self) -> bool {
+        !self.on_ground && self.vel_y >= FALL_POSE_SPEED
+    }
+
     pub fn render(
         &self,
         canvas: &mut WindowCanvas,
@@ -958,9 +974,10 @@ impl Player {
                 self.width,
                 HEAD_CENTER_X,
             ),
-            // Dropping (including the fall onto a door's base height): the wide
-            // top-right pose, cape trailing behind him.
-            _ if !self.on_ground && self.vel_y > 0.0 => {
+            // Dropping fast enough for the cape to catch (including the fall
+            // onto a door's base height): the wide top-right pose, cape
+            // trailing behind him.
+            _ if self.uses_fall_pose() => {
                 (FALL_SRC_X, 0, FALL_FRAME_WIDTH, FALL_HEAD_CENTER_X)
             }
             // First row: idle/walk frames (also used while rising, and while
@@ -1015,6 +1032,60 @@ mod tests {
     use crate::level::LevelData;
     use crate::tiles;
     use crate::time::FIXED_DT;
+
+    /// The cape pose must not flick out at the apex of the arc: a player who
+    /// has only just started dropping still uses the rising pose, and the
+    /// swap happens once he is falling at `FALL_POSE_SPEED`.
+    #[test]
+    fn cape_pose_waits_for_real_falling_speed() {
+        let mut player = Player::new(0.0, 0.0);
+        player.on_ground = false;
+
+        // Rising, and the moment at the very top of the arc.
+        for vel_y in [-JUMP_SPEED, -1.0, 0.0] {
+            player.vel_y = vel_y;
+            assert!(
+                !player.uses_fall_pose(),
+                "vel_y = {vel_y}: should still hold the rising pose"
+            );
+        }
+
+        // Just barely dropping - still too slow for the cape to catch.
+        player.vel_y = FALL_POSE_SPEED - 1.0;
+        assert!(!player.uses_fall_pose(), "cape caught too early");
+
+        // At and beyond the threshold the cape streams out.
+        for vel_y in [FALL_POSE_SPEED, FALL_POSE_SPEED + 200.0] {
+            player.vel_y = vel_y;
+            assert!(player.uses_fall_pose(), "vel_y = {vel_y}: cape should be out");
+        }
+
+        // Grounded never uses the falling pose, however large vel_y is.
+        player.on_ground = true;
+        player.vel_y = FALL_POSE_SPEED + 200.0;
+        assert!(!player.uses_fall_pose(), "grounded must not use the fall pose");
+    }
+
+    /// The threshold is reached a short way into the fall, not many frames
+    /// later: after a full jump the cape is out well before he lands.
+    #[test]
+    fn cape_pose_engages_shortly_after_the_apex() {
+        let mut player = Player::new(0.0, 0.0);
+        player.on_ground = false;
+        player.vel_y = 0.0;
+
+        let mut frames = 0;
+        while !player.uses_fall_pose() {
+            player.vel_y += GRAVITY * FIXED_DT;
+            frames += 1;
+            assert!(frames < 60, "cape pose never engaged while falling");
+        }
+
+        assert!(
+            (4..=10).contains(&frames),
+            "cape should catch a few frames past the apex, took {frames}"
+        );
+    }
 
     /// Build a 10x10 level of open air with a single right-moving platform
     /// (tile 10) occupying tile (2, 2) — its rect spans x in [80, 120],
