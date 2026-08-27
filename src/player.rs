@@ -79,6 +79,13 @@ pub struct Player {
     spawn_x: f32,
     spawn_y: f32,
 
+    /// Steps since the last jump press, so `<= JUMP_BUFFER_STEPS` means a press
+    /// is still pending. `WINDOW_SPENT` once a jump has consumed it.
+    steps_since_press: u8,
+    /// Steps since he was last on the ground, so `<= COYOTE_STEPS` means a jump
+    /// is still allowed. `WINDOW_SPENT` once a jump has consumed it.
+    airborne_steps: u8,
+
     // Animation
     frame: usize,
     frame_time: f32,
@@ -100,6 +107,18 @@ const RUN_SPEED: f32 = 260.0;
 const RUN_ACCELERATION: f32 = 500.0;
 const RUN_DECELERATION: f32 = 800.0;
 const JUMP_SPEED: f32 = 400.0;
+// Both jump-forgiveness windows, in fixed physics steps (the step is always
+// FIXED_DT, so steps and time are interchangeable here; 3 steps is 50 ms).
+//
+// A press is remembered for this long, so pressing a hair *early* - just
+// before touching down - still jumps on landing instead of being swallowed.
+const JUMP_BUFFER_STEPS: u8 = 3;
+// A jump stays allowed for this long after he leaves the ground, so pressing a
+// hair *late* - just after walking off a lip - still jumps instead of nothing.
+const COYOTE_STEPS: u8 = 3;
+// Parks either counter past its window. Jumping spends both, so that one press
+// and one lift-off can never be cashed a second time in mid-air.
+const WINDOW_SPENT: u8 = u8::MAX;
 const GRAVITY: f32 = 1200.0;
 const JUMP_HOLD_GRAVITY: f32 = 800.0; // Reduced gravity while holding jump
 const JUMP_RELEASE_DAMPING: f32 = 0.5; // Velocity multiplier when jump is released
@@ -173,6 +192,10 @@ impl Player {
             vel_x: 0.0,
             vel_y: 0.0,
             on_ground: false,
+            steps_since_press: WINDOW_SPENT,
+            // He spawns in mid-air above the ground, and must not get a free
+            // jump out of it before his feet have touched anything.
+            airborne_steps: WINDOW_SPENT,
             state: PlayerState::Alive,
             spawn_x: x,
             spawn_y: y,
@@ -400,6 +423,15 @@ impl Player {
     }
 
     pub fn update(&mut self, input: &InputState, tilemap: &mut TileMap, delta_time: f32) {
+        // Age the remembered press, resetting to zero on a fresh one. A press
+        // made *this* step therefore reads as zero steps old at the jump check
+        // at the end of it, so buffering never delays an ordinary jump.
+        self.steps_since_press = if input.jump_pressed {
+            0
+        } else {
+            self.steps_since_press.saturating_add(1)
+        };
+
         // Horizontal movement. Releasing the stick still stops dead, and both
         // directions at once still resolves to right, exactly as before.
         if input.left {
@@ -500,6 +532,15 @@ impl Player {
                 .any(|platform| self.feet_on_platform(platform));
         }
 
+        // Coyote time is measured from the ground state resolved just above, so
+        // it counts real support - a block at his side or overhead never
+        // refreshes it, for the same reasons that keep it out of `on_ground`.
+        self.airborne_steps = if self.on_ground {
+            0
+        } else {
+            self.airborne_steps.saturating_add(1)
+        };
+
         // Touch all tiles the player is currently overlapping
         self.touch_tiles(tilemap);
 
@@ -512,11 +553,18 @@ impl Player {
 
         // Jump logic (after collision so we know whether he is grounded)
 
-        // Only a fresh press jumps: holding the button down after landing must
-        // not bounce the player again, he has to release and press once more.
-        if self.on_ground && input.jump_pressed {
+        // Both sides of the press are forgiven: `steps_since_press` remembers a
+        // press made just before landing, `airborne_steps` keeps the jump
+        // available just after walking off an edge. Only a fresh press ever
+        // resets the former, so holding the button down still cannot bounce
+        // him - he has to release and press again.
+        if self.airborne_steps <= COYOTE_STEPS && self.steps_since_press <= JUMP_BUFFER_STEPS {
             self.vel_y = -JUMP_SPEED;
             self.on_ground = false;
+            // Spend both windows. Leaving either armed would let a second press
+            // moments later cash the same lift-off again as a mid-air jump.
+            self.steps_since_press = WINDOW_SPENT;
+            self.airborne_steps = WINDOW_SPENT;
         }
 
         self.update_animation(delta_time);
@@ -965,6 +1013,10 @@ impl Player {
         self.vel_x = 0.0;
         self.vel_y = 0.0;
         self.on_ground = false;
+        // Respawn owes him nothing: a press buffered as he died must not fire,
+        // and he gets no coyote jump until his feet touch down again.
+        self.steps_since_press = WINDOW_SPENT;
+        self.airborne_steps = WINDOW_SPENT;
         self.frame = 0;
         self.frame_time = 0.0;
         self.gait = Gait::Walking;
@@ -1077,6 +1129,216 @@ mod tests {
     use crate::level::LevelData;
     use crate::tiles;
     use crate::time::FIXED_DT;
+
+    /// Flat ground across the whole map, with his feet resting on it.
+    fn on_flat_ground() -> (Player, TileMap) {
+        let mut grid = vec![vec![tiles::EMPTY; 10]; 4];
+        grid[1] = vec![tiles::SOLID; 10];
+        let mut player = Player::new(40.0, TILE_SIZE - PLAYER_HEIGHT as f32);
+        let mut tilemap = TileMap::from_data(grid);
+        player.update(&InputState::new(), &mut tilemap, FIXED_DT);
+        assert!(player.on_ground, "player should start grounded");
+        (player, tilemap)
+    }
+
+    /// Ground for the first three columns, then a drop, so he can walk off a
+    /// lip. His feet rest on the ledge at the start.
+    fn on_a_ledge() -> (Player, TileMap) {
+        let mut grid = vec![vec![tiles::EMPTY; 10]; 4];
+        grid[1][..3].fill(tiles::SOLID);
+        let mut player = Player::new(0.0, TILE_SIZE - PLAYER_HEIGHT as f32);
+        let mut tilemap = TileMap::from_data(grid);
+        player.update(&InputState::new(), &mut tilemap, FIXED_DT);
+        assert!(player.on_ground, "player should start on the ledge");
+        (player, tilemap)
+    }
+
+    fn press() -> InputState {
+        InputState {
+            jump: true,
+            jump_pressed: true,
+            ..InputState::new()
+        }
+    }
+
+    /// The whole point of the buffer: a press made just before touchdown is
+    /// remembered and fires on landing instead of being swallowed.
+    #[test]
+    fn a_press_just_before_landing_is_buffered() {
+        // How many steps a clean fall takes, as the reference to press against.
+        let landing_step = {
+            let (mut player, mut tilemap) = on_flat_ground();
+            player.y -= 60.0; // lift him into the air
+            player.on_ground = false;
+            let mut step = 0;
+            while !player.on_ground {
+                player.update(&InputState::new(), &mut tilemap, FIXED_DT);
+                step += 1;
+                assert!(step < 200, "player never landed");
+            }
+            step
+        };
+        assert!(
+            landing_step > JUMP_BUFFER_STEPS as usize + 2,
+            "the fall must be long enough to press early in it"
+        );
+
+        // Pressing within the window before touchdown jumps on landing;
+        // pressing well outside it is forgotten, as it was before.
+        for (press_step, should_jump) in [
+            (landing_step - 1, true),
+            (landing_step - JUMP_BUFFER_STEPS as usize, true),
+            (landing_step - JUMP_BUFFER_STEPS as usize - 3, false),
+        ] {
+            let (mut player, mut tilemap) = on_flat_ground();
+            player.y -= 60.0;
+            player.on_ground = false;
+
+            let mut jumped = false;
+            for step in 1..=landing_step + 2 {
+                let input = if step == press_step {
+                    press()
+                } else {
+                    InputState::new()
+                };
+                player.update(&input, &mut tilemap, FIXED_DT);
+                if player.vel_y < 0.0 {
+                    jumped = true;
+                }
+            }
+            assert_eq!(
+                jumped, should_jump,
+                "press at step {press_step} of a {landing_step}-step fall: \
+                 expected jumped = {should_jump}"
+            );
+        }
+    }
+
+    /// Coyote time: a press a few steps *after* walking off the lip still
+    /// jumps, and one past the window does not. `nth_airborne_step` is which
+    /// step off the ledge the press lands on - the step he leaves the ground
+    /// counts as the first, so the boundary sits exactly at COYOTE_STEPS.
+    #[test]
+    fn a_press_just_after_leaving_the_ledge_still_jumps() {
+        for nth_airborne_step in 2..=COYOTE_STEPS + 1 {
+            let (mut player, mut tilemap) = on_a_ledge();
+            let walk_right = InputState {
+                right: true,
+                ..InputState::new()
+            };
+
+            // Walk off the lip. That last step is airborne step 1.
+            let mut steps = 0;
+            while player.on_ground {
+                player.update(&walk_right, &mut tilemap, FIXED_DT);
+                steps += 1;
+                assert!(steps < 200, "player never left the ledge");
+            }
+            assert!(player.vel_y > 0.0, "he should be falling off the ledge");
+            assert_eq!(player.airborne_steps, 1);
+
+            // Coast to the step before the one being tested, then press.
+            while player.airborne_steps < nth_airborne_step - 1 {
+                player.update(&walk_right, &mut tilemap, FIXED_DT);
+            }
+            let mut input = press();
+            input.right = true;
+            player.update(&input, &mut tilemap, FIXED_DT);
+
+            let should_jump = nth_airborne_step <= COYOTE_STEPS;
+            assert_eq!(
+                player.vel_y < 0.0,
+                should_jump,
+                "pressing on airborne step {nth_airborne_step} \
+                 (window is {COYOTE_STEPS}): expected jumped = {should_jump}, \
+                 vel_y = {}",
+                player.vel_y
+            );
+        }
+    }
+
+    /// The two windows must not combine into a mid-air double jump: jumping
+    /// spends the coyote window, so a second press moments later does nothing.
+    #[test]
+    fn coyote_time_cannot_be_cashed_twice_for_a_double_jump() {
+        let (mut player, mut tilemap) = on_flat_ground();
+
+        player.update(&press(), &mut tilemap, FIXED_DT);
+        assert!(player.vel_y < 0.0, "the first press should jump");
+        assert!(!player.on_ground);
+
+        // Press again on every step of the rise - the whole coyote window and
+        // well past it. He must only ever slow under gravity, never re-launch.
+        let mut previous = player.vel_y;
+        for step in 1..=COYOTE_STEPS as usize + 6 {
+            player.update(&press(), &mut tilemap, FIXED_DT);
+            assert!(
+                player.vel_y > previous,
+                "step {step}: a second press re-launched him \
+                 ({previous} -> {})",
+                player.vel_y
+            );
+            previous = player.vel_y;
+        }
+    }
+
+    /// Buffering must not put latency into an ordinary jump: a press made while
+    /// standing on the ground still fires on that very step.
+    #[test]
+    fn a_grounded_press_jumps_on_the_same_step() {
+        let (mut player, mut tilemap) = on_flat_ground();
+        player.update(&press(), &mut tilemap, FIXED_DT);
+
+        assert_eq!(
+            player.vel_y, -JUMP_SPEED,
+            "a grounded press should launch on the same step it is made"
+        );
+        assert!(!player.on_ground);
+    }
+
+    /// A moving platform underfoot is real support, so it must refresh coyote
+    /// time and a press while riding must jump exactly as it does off a tile.
+    #[test]
+    fn riding_a_platform_refreshes_coyote_time() {
+        let mut tilemap = map_with_active_right_platform();
+        // Standing on top of the platform, whose rect spans y 80..120.
+        let mut player = Player::new(90.0, 80.0 - PLAYER_HEIGHT as f32);
+
+        // The engine updates the tilemap before the player; mirror that here.
+        for step in 0..5 {
+            tilemap.update(FIXED_DT);
+            player.update(&InputState::new(), &mut tilemap, FIXED_DT);
+            assert!(player.on_ground, "step {step}: should be riding the platform");
+            assert_eq!(
+                player.airborne_steps, 0,
+                "step {step}: a platform underfoot should count as ground"
+            );
+        }
+
+        tilemap.update(FIXED_DT);
+        player.update(&press(), &mut tilemap, FIXED_DT);
+        assert_eq!(player.vel_y, -JUMP_SPEED, "should jump off the platform");
+        assert!(!player.on_ground);
+    }
+
+    /// Dying must not hand him a jump on respawn: a press buffered as he died,
+    /// and the ground he died on, are both forgotten by `reset`.
+    #[test]
+    fn respawn_owes_no_buffered_jump() {
+        let (mut player, mut tilemap) = on_flat_ground();
+
+        // Buffer a press, then die and respawn before it could be spent.
+        player.steps_since_press = 0;
+        player.kill();
+        player.reset();
+
+        assert_eq!(player.steps_since_press, WINDOW_SPENT, "respawn kept a press");
+        assert_eq!(player.airborne_steps, WINDOW_SPENT, "respawn kept coyote time");
+
+        // The first step after respawning must not launch him upward.
+        player.update(&InputState::new(), &mut tilemap, FIXED_DT);
+        assert!(player.vel_y >= 0.0, "player jumped on respawn");
+    }
 
     /// Walking and running must draw from different cycles, and each frame of
     /// each cycle must land on its own sprite-sheet cell.
