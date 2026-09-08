@@ -27,7 +27,10 @@ pub fn load_png_texture<'a, T>(
         .map_err(|e| format!("{path}: {e}"))?;
 
     if info.bit_depth != png::BitDepth::Eight {
-        return Err(format!("{path}: unsupported PNG bit depth {:?}", info.bit_depth));
+        return Err(format!(
+            "{path}: unsupported PNG bit depth {:?}",
+            info.bit_depth
+        ));
     }
 
     // Normalise to 32-bit RGBA so we can use a single SDL pixel format. The png

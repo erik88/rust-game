@@ -57,6 +57,7 @@
 //! | `E`     | 13 - normal exit door ([`tiles::EXIT`])     |
 //! | `C`     | 14 - gold coin ([`tiles::COIN`])            |
 //! | `S`     | 16 - secret exit door ([`tiles::SECRET_EXIT`]) |
+//! | `K`     | 18 - cape powerup, unlocks running         |
 //! | `R`     | 17 - red coin ([`tiles::RED_COIN`])         |
 //! | `P`     | player spawn point (stored as empty space)  |
 
@@ -201,6 +202,7 @@ impl LevelData {
                     'S' => tiles::SECRET_EXIT,
                     'C' => tiles::COIN,
                     'R' => tiles::RED_COIN,
+                    'K' => tiles::CAPE,
                     'P' => {
                         if spawn.is_some() {
                             return Err("level has more than one spawn point 'P'".to_string());
@@ -625,6 +627,7 @@ fn tile_to_char(tile: u32) -> char {
         tiles::SECRET_EXIT => 'S',
         tiles::COIN => 'C',
         tiles::RED_COIN => 'R',
+        tiles::CAPE => 'K',
         n @ (1 | 3..=8) => char::from_digit(n, 10).unwrap(),
         _ => '.', // EMPTY and anything unexpected
     }
@@ -732,8 +735,14 @@ mod tests {
         assert_eq!(
             level.exits,
             vec![
-                ExitDoor { tile: (2, 0), dest: "forest-2".to_string() },
-                ExitDoor { tile: (0, 0), dest: "bonus".to_string() },
+                ExitDoor {
+                    tile: (2, 0),
+                    dest: "forest-2".to_string()
+                },
+                ExitDoor {
+                    tile: (0, 0),
+                    dest: "bonus".to_string()
+                },
             ]
         );
     }

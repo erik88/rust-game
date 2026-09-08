@@ -149,7 +149,11 @@ pub fn draw_selection(
                     TILE_SIZE as u32,
                     TILE_SIZE as u32,
                 );
-                let _ = canvas.copy(tilemap_texture, Some(src), Some(dst));
+                if tile == tiles::CAPE {
+                    tiles::draw_cape(canvas, dst);
+                } else {
+                    let _ = canvas.copy(tilemap_texture, Some(src), Some(dst));
+                }
             }
         }
         tilemap_texture.set_alpha_mod(255);
@@ -737,13 +741,19 @@ fn draw_palette_slots(
         let _ = canvas.fill_rect(dst);
 
         match *tool {
+            Tool::Tile(tiles::CAPE) => tiles::draw_cape(canvas, dst),
             Tool::Tile(n) => {
                 let (sx, sy) = tiles::tile_src_xy(n);
                 let src = Rect::new(sx, sy, TILE_SIZE as u32, TILE_SIZE as u32);
                 let _ = canvas.copy(tilemap_texture, Some(src), Some(dst));
             }
             Tool::Spawn => {
-                let src = Rect::new(0, 0, PLAYER_WIDTH, PLAYER_HEIGHT);
+                let src = Rect::new(
+                    0,
+                    (character_texture.query().height / 2) as i32,
+                    PLAYER_WIDTH,
+                    PLAYER_HEIGHT,
+                );
                 let player_dst = Rect::new(
                     slot_x + (SLOT - PLAYER_WIDTH as i32) / 2,
                     slot_y + (SLOT - PLAYER_HEIGHT as i32) / 2,
@@ -754,10 +764,14 @@ fn draw_palette_slots(
             }
             Tool::Erase => {
                 canvas.set_draw_color(Color::RGB(220, 80, 80));
-                let _ = canvas
-                    .draw_line((slot_x + 8, slot_y + 8), (slot_x + SLOT - 8, slot_y + SLOT - 8));
-                let _ = canvas
-                    .draw_line((slot_x + SLOT - 8, slot_y + 8), (slot_x + 8, slot_y + SLOT - 8));
+                let _ = canvas.draw_line(
+                    (slot_x + 8, slot_y + 8),
+                    (slot_x + SLOT - 8, slot_y + SLOT - 8),
+                );
+                let _ = canvas.draw_line(
+                    (slot_x + SLOT - 8, slot_y + 8),
+                    (slot_x + 8, slot_y + SLOT - 8),
+                );
             }
         }
 
@@ -791,7 +805,10 @@ pub fn draw_top_bar(
     let _ = canvas.fill_rect(Rect::new(0, 0, VIEW_WIDTH, TOP_BAR_HEIGHT as u32));
     // Bottom border
     canvas.set_draw_color(Color::RGB(80, 80, 100));
-    let _ = canvas.draw_line((0, TOP_BAR_HEIGHT - 1), (VIEW_WIDTH as i32, TOP_BAR_HEIGHT - 1));
+    let _ = canvas.draw_line(
+        (0, TOP_BAR_HEIGHT - 1),
+        (VIEW_WIDTH as i32, TOP_BAR_HEIGHT - 1),
+    );
 
     // --- Levels button (shows the current level; opens the browser) ---
     let level_label = format!("Lv {}/{}", current + 1, docs.len());

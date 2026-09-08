@@ -8,7 +8,7 @@ A small 2D platform game built with Rust and SDL2.
 | --- | --- | --- |
 | Move | Arrow keys or `A`/`D` | D-pad or left stick |
 | Jump | `Space` | `A` |
-| Run | Hold `Shift` | `B`/`X` |
+| Run (requires cape) | Hold `Shift` | `B`/`X` |
 | Quit | `Esc` | `Start` |
 
 Holding jump gives a higher jump; releasing it early cuts the jump short.
@@ -46,6 +46,11 @@ cargo test                # run the test suite
 Assets (`character.png`, `tilemap.png`) and the `levels/` directory are loaded
 from the current working directory, so run cargo from the project root.
 
+`character.png` is an 80×228 sprite sheet with two matching 114-pixel-high
+banks: cape-wearing frames above, cape-free frames below. Each bank has three
+38-pixel rows for movement, death/walking, and door entry. Edit the frames
+directly in the PNG; the texture loader does not modify them.
+
 ## Packaging for distribution
 
 Platform packaging scripts live under `packaging/`.
@@ -74,3 +79,5 @@ Send the `.dmg` only — it already contains the app.
 
 See `packaging/linux/` and `packaging/windows/` for their respective build
 scripts.
+
+Collect a white cape to unlock running. The cape is lost on death or when starting a level. Place cape powerups with `K` in level files or the cape tile in the editor.

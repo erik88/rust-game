@@ -135,6 +135,9 @@ impl GameEngine {
         // Pick up any coins the player is overlapping; the exit stays shut
         // until they are all gone.
         self.tilemap.collect_coins(&self.player.bounding_rect());
+        if self.tilemap.collect_cape(&self.player.bounding_rect()) {
+            self.player.equip_cape();
+        }
 
         // Check if player fell off the screen or touched deadly tile and reset
         // if needed. Touching a death tile marks it so it shows its hit sprite

@@ -59,6 +59,8 @@ pub const SECRET_EXIT: u32 = 16;
 /// secret exit doors open, independently of the gold [`COIN`]s. Placed with the
 /// `R` character.
 pub const RED_COIN: u32 = 17;
+/// Cape powerup, placed with `K`; unlocks running until respawn.
+pub const CAPE: u32 = 18;
 /// Exit door, open phase. This is purely a render substitution for an [`EXIT`]
 /// tile once all coins are gone; it never appears in the tile grid itself.
 pub const EXIT_OPEN: u32 = 19;
@@ -112,11 +114,64 @@ pub fn tile_src_xy(tile_id: u32) -> SpriteXy {
 pub fn is_solid(tile_type: u32) -> bool {
     !matches!(
         tile_type,
-        EMPTY | DEATH | PERIODIC_GHOST | EXIT | COIN | SECRET_EXIT | RED_COIN
+        EMPTY | DEATH | PERIODIC_GHOST | EXIT | COIN | SECRET_EXIT | RED_COIN | CAPE
     )
 }
 
 /// Whether this tile type is extracted from the grid as a moving platform
 pub fn is_moving(tile_type: u32) -> bool {
     matches!(tile_type, MOVE_UP | MOVE_RIGHT | MOVE_DOWN | MOVE_LEFT)
+}
+
+/// Draw a side-on cape, trailing left from its collar, in the game and editor.
+pub fn draw_cape(canvas: &mut sdl2::render::WindowCanvas, dst: sdl2::rect::Rect) {
+    let pixel_rect = |x: i32, y: i32, width: i32, height: i32| {
+        let left = x * dst.width() as i32 / 40;
+        let top = y * dst.height() as i32 / 40;
+        let right = (x + width) * dst.width() as i32 / 40;
+        let bottom = (y + height) * dst.height() as i32 / 40;
+        sdl2::rect::Rect::new(
+            dst.x() + left,
+            dst.y() + top,
+            (right - left).max(1) as u32,
+            (bottom - top).max(1) as u32,
+        )
+    };
+
+    // Curved pixel contours: the shoulder hangs briefly, bows out to the
+    // left, then curls back at the hem. The shaded edge follows the same bend.
+    let contours = [
+        (24, 28),
+        (24, 28),
+        (24, 28),
+        (24, 28),
+        (23, 27),
+        (23, 27),
+        (22, 27),
+        (21, 26),
+        (20, 26),
+        (19, 25),
+        (18, 25),
+        (17, 24),
+        (15, 24),
+        (14, 23),
+        (12, 23),
+        (11, 22),
+        (10, 22),
+        (9, 21),
+        (8, 21),
+        (8, 20),
+        (9, 20),
+        (10, 19),
+        (12, 19),
+        (15, 18),
+    ];
+    for (y, (left, right)) in contours.into_iter().enumerate() {
+        canvas.set_draw_color(sdl2::pixels::Color::RGB(190, 205, 220));
+        let _ = canvas.fill_rect(pixel_rect(left, 8 + y as i32, right - left, 1));
+        canvas.set_draw_color(sdl2::pixels::Color::RGB(255, 255, 255));
+        let _ = canvas.fill_rect(pixel_rect(left + 2, 8 + y as i32, right - left - 2, 1));
+    }
+    canvas.set_draw_color(sdl2::pixels::Color::RGB(255, 169, 88));
+    let _ = canvas.fill_rect(pixel_rect(25, 7, 5, 3));
 }

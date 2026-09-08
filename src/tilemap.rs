@@ -151,7 +151,16 @@ impl PathState {
     }
 }
 
-/// A transient sparkle played at a coin's tile right after it is collected.
+const CAPE_EFFECT_DURATION: f32 = 0.45;
+
+/// Scattered pixels pulled into the player after collecting a cape.
+#[derive(Clone)]
+struct CapeEffect {
+    center: Vec2d,
+    timer: f32,
+}
+
+/// A transient sparkle played at a coin tile right after collection.
 #[derive(Clone)]
 struct CoinEffect {
     tile_x: usize,
@@ -211,9 +220,10 @@ pub struct TileMap {
     gold_coins: usize,
     red_coins: usize,
     triggered_death_tiles: HashSet<(usize, usize)>, // Death tiles the player has hit this life
-    coin_effects: Vec<CoinEffect>,           // Sparkles playing where coins were collected
-    death_effects: Vec<DeathEffect>,         // Sparkles playing where death tiles were touched
-    decorations: Vec<Decoration>,            // Render-only sprites; never affect gameplay
+    coin_effects: Vec<CoinEffect>,                  // Sparkles playing where coins were collected
+    cape_effects: Vec<CapeEffect>,
+    death_effects: Vec<DeathEffect>, // Sparkles playing where death tiles were touched
+    decorations: Vec<Decoration>,    // Render-only sprites; never affect gameplay
 }
 
 pub struct Tile {
@@ -281,6 +291,7 @@ impl TileMap {
             red_coins,
             triggered_death_tiles: HashSet::new(),
             coin_effects: Vec::new(),
+            cape_effects: Vec::new(),
             death_effects: Vec::new(),
             decorations: Vec::new(),
         }
@@ -341,6 +352,7 @@ impl TileMap {
         self.red_coins = count_tiles(&self.tiles, tiles::RED_COIN);
         self.triggered_death_tiles.clear();
         self.coin_effects.clear();
+        self.cape_effects.clear();
         self.death_effects.clear();
     }
 
@@ -378,6 +390,11 @@ impl TileMap {
             effect.timer += delta_time;
         }
         self.coin_effects.retain(|effect| effect.timer < total);
+        for effect in &mut self.cape_effects {
+            effect.timer += delta_time;
+        }
+        self.cape_effects
+            .retain(|effect| effect.timer < CAPE_EFFECT_DURATION);
     }
 
     /// All periodic tiles swap between their solid and ghost phase on a
@@ -604,6 +621,27 @@ impl TileMap {
         self.disappearing_tiles.entry((x, y)).or_insert(remaining);
     }
 
+    /// Collect capes and keep their collapsing pixel rings centred on the player.
+    pub fn collect_cape(&mut self, player_bounds: &Rect) -> bool {
+        let center = Vec2d::new(
+            player_bounds.position.x + player_bounds.size.x / 2.0,
+            player_bounds.position.y + player_bounds.size.y / 2.0,
+        );
+        for effect in &mut self.cape_effects {
+            effect.center = center;
+        }
+        let hits: Vec<_> = self
+            .tiles_of_type(tiles::CAPE)
+            .filter(|tile| player_bounds.intersects(&tile.get_bounding_rect().shrink(8.0)))
+            .map(|tile| (tile.x, tile.y))
+            .collect();
+        for &(x, y) in &hits {
+            self.tiles[y][x] = tiles::EMPTY;
+            self.cape_effects.push(CapeEffect { center, timer: 0.0 });
+        }
+        !hits.is_empty()
+    }
+
     /// Remove every coin the player's bounding box overlaps - gold and red alike,
     /// each opening its own door type. Returns the number collected this frame.
     pub fn collect_coins(&mut self, player_bounds: &Rect) -> u32 {
@@ -795,6 +833,11 @@ impl TileMap {
                     TILE_SIZE as u32,
                 );
 
+                if sprite_id == tiles::CAPE {
+                    tiles::draw_cape(canvas, dst_rect);
+                    continue;
+                }
+
                 // Pick the source sprite: coins shimmer through their extra
                 // sprites, and a death tile the player just hit shows its
                 // angry-face sprite until the level resets on respawn.
@@ -851,7 +894,7 @@ impl TileMap {
                 .unwrap();
         }
 
-        // Coin-collection sparkles play their frames in sequence at the tile
+        // Coin sparkles play their frames in sequence at the tile
         // the coin occupied.
         for effect in &self.coin_effects {
             let frame = (effect.timer / COIN_COLLECT_FRAME) as usize;
@@ -884,6 +927,40 @@ impl TileMap {
         camera_y: i32,
     ) {
         self.render_decorations(canvas, texture, camera_x, camera_y, DecoLayer::Foreground);
+
+        // Crisp squares, unevenly spaced around a ring, accelerate inward.
+        // Deterministic offsets keep the scatter stable instead of flickering.
+        for effect in &self.cape_effects {
+            let progress = (effect.timer / CAPE_EFFECT_DURATION).clamp(0.0, 1.0);
+            let remaining = 1.0 - progress * progress;
+            for i in 0..24 {
+                let scatter = ((i * 17 % 11) as f32 - 5.0) / 5.0;
+                let angle =
+                    std::f32::consts::TAU * i as f32 / 24.0 + scatter * 0.09 + progress * 0.25;
+                let radius = (29.0 + scatter * 7.0) * remaining;
+                let size = if progress > 0.8 {
+                    1
+                } else {
+                    2 + (i % 2) as u32
+                };
+                canvas.set_draw_color(if i % 4 == 0 {
+                    sdl2::pixels::Color::RGB(255, 210, 140)
+                } else {
+                    sdl2::pixels::Color::RGB(255, 255, 255)
+                });
+                let dst = sdl2::rect::Rect::new(
+                    (effect.center.x + angle.cos() * radius).round() as i32
+                        - camera_x
+                        - size as i32 / 2,
+                    (effect.center.y + angle.sin() * radius).round() as i32
+                        - camera_y
+                        - size as i32 / 2,
+                    size,
+                    size,
+                );
+                let _ = canvas.fill_rect(dst);
+            }
+        }
 
         // Death-touch sparkles flash their two frames (1-2-1-2) centred on the
         // point where the player hit the death tile. Drawn last so the effect

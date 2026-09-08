@@ -569,6 +569,25 @@ mod tests {
     }
 
     #[test]
+    fn cape_pickup_unlocks_running_and_respawns_after_death() {
+        use rustgamex::level::LevelData;
+        use rustgamex::tiles;
+        let level = LevelData::parse("P.K.....................\n111111111111111111111111").unwrap();
+        assert_eq!(LevelData::parse(&level.to_text()).unwrap().tiles, level.tiles);
+        let mut engine = GameEngine::from_levels(vec![level], OnDeath::Respawn).unwrap();
+        let input = InputState { right: true, run: true, ..InputState::new() };
+        assert!(!engine.player().has_cape());
+        for _ in 0..40 { engine.step(&input, 1.0 / 60.0); }
+        assert!(engine.player().has_cape());
+        assert_eq!(engine.player().vel_x, 260.0);
+        assert_eq!(engine.tilemap().tiles[0][2], tiles::EMPTY);
+        engine.player_mut().kill();
+        for _ in 0..40 { engine.step(&InputState::new(), 1.0 / 60.0); }
+        assert!(!engine.player().has_cape());
+        assert_eq!(engine.tilemap().tiles[0][2], tiles::CAPE);
+    }
+
+    #[test]
     fn test_collecting_all_coins_opens_the_exit() {
         use rustgamex::geometry::rect::Rect;
         use rustgamex::geometry::vec2d::Vec2d;

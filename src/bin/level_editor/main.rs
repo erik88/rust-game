@@ -83,6 +83,7 @@ fn main() -> Result<(), String> {
         // Tile id 2 is unused, so skip it when listing the paintable tiles.
         .chain(std::iter::once(Tool::Tile(tiles::SOLID)))
         .chain((tiles::DEATH..=tiles::MOVE_LEFT).map(Tool::Tile))
+        .chain(std::iter::once(Tool::Tile(tiles::CAPE)))
         .collect();
 
     // Exit-mode palette: the exit doors (normal / secret) and the coins that gate
@@ -533,7 +534,13 @@ fn main() -> Result<(), String> {
             camera_xi,
             render_cam_y,
         );
-        draw_hover(&mut canvas, &editor.tilemap, editor.mouse, camera_xi, render_cam_y);
+        draw_hover(
+            &mut canvas,
+            &editor.tilemap,
+            editor.mouse,
+            camera_xi,
+            render_cam_y,
+        );
         if editor.mode == Mode::Select {
             draw_selection(
                 &mut canvas,
@@ -611,18 +618,34 @@ fn print_controls() {
     println!("  Arrows / WASD: pan camera              Home        : scroll to start");
     println!("  Ctrl+Arrow  : grow canvas at that edge Ctrl+Shift+Arrow: shrink that edge");
     println!("  G           : toggle grid              Ctrl+S      : save level");
-    println!("  Modes (toolbar/keys): F1 Normal tiles | F2 path blocks | F3 decorations | F4 exit doors | F5 select");
-    println!("  Levels      : the 'Lv n/m' button or Tab opens the level browser; click a level to jump");
-    println!("  Normal mode : click palette bar to pick a tool, left-click paints, right-click erases");
+    println!(
+        "  Modes (toolbar/keys): F1 Normal tiles | F2 path blocks | F3 decorations | F4 exit doors | F5 select"
+    );
+    println!(
+        "  Levels      : the 'Lv n/m' button or Tab opens the level browser; click a level to jump"
+    );
+    println!(
+        "  Normal mode : click palette bar to pick a tool, left-click paints, right-click erases"
+    );
     println!("                (world tiles only; exit doors and coins moved to Exit mode)");
     println!("  Path mode   : left-click adds points / drags points & edges, right-click deletes");
     println!("                N new block, L open/close loop, Tab cycle, Del remove block");
     println!("                (bottom bar shows New-block and Toggle-loop buttons)");
-    println!("  Deco mode   : click picker to choose a sprite, left-click places, right-click erases");
-    println!("                deco toolbar button: 1st click = background layer, further clicks toggle bg/fg");
-    println!("  Exit mode   : palette bar paints E/S exit doors and C/R gold/red coins (right-click erases);");
-    println!("                click a door to select it, then Set-dest picks its target level (routing auto-syncs)");
-    println!("  Select mode : left-drag marks a tile block, drag from inside it to move (Ctrl-drag copies);");
+    println!(
+        "  Deco mode   : click picker to choose a sprite, left-click places, right-click erases"
+    );
+    println!(
+        "                deco toolbar button: 1st click = background layer, further clicks toggle bg/fg"
+    );
+    println!(
+        "  Exit mode   : palette bar paints E/S exit doors and C/R gold/red coins (right-click erases);"
+    );
+    println!(
+        "                click a door to select it, then Set-dest picks its target level (routing auto-syncs)"
+    );
+    println!(
+        "  Select mode : left-drag marks a tile block, drag from inside it to move (Ctrl-drag copies);"
+    );
     println!("                right-click clears the selection, Delete erases the marked tiles");
     println!("  Esc / Q     : quit (Esc first closes an open level browser)");
 }

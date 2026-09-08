@@ -74,6 +74,7 @@ pub struct Player {
     pub on_ground: bool,
 
     state: PlayerState,
+    has_cape: bool,
 
     // Spawn position, for reset()
     spawn_x: f32,
@@ -197,6 +198,7 @@ impl Player {
             // jump out of it before his feet have touched anything.
             airborne_steps: WINDOW_SPENT,
             state: PlayerState::Alive,
+            has_cape: false,
             spawn_x: x,
             spawn_y: y,
             frame: 0,
@@ -204,6 +206,14 @@ impl Player {
             gait: Gait::Walking,
             facing_right: true,
         }
+    }
+
+    pub fn has_cape(&self) -> bool {
+        self.has_cape
+    }
+
+    pub fn equip_cape(&mut self) {
+        self.has_cape = true;
     }
 
     /// True while the player is playing his death animation.
@@ -276,9 +286,17 @@ impl Player {
 
                 // Penetration depth in each direction
                 let candidates = [
-                    (player_right - tile_left, -(player_right - tile_left), 0.0f32),
+                    (
+                        player_right - tile_left,
+                        -(player_right - tile_left),
+                        0.0f32,
+                    ),
                     (tile_right - self.x, tile_right - self.x, 0.0f32),
-                    (player_bottom - tile_top, 0.0f32, -(player_bottom - tile_top)),
+                    (
+                        player_bottom - tile_top,
+                        0.0f32,
+                        -(player_bottom - tile_top),
+                    ),
                     (tile_bottom - self.y, 0.0f32, tile_bottom - self.y),
                 ];
 
@@ -451,7 +469,11 @@ impl Player {
         if direction == 0.0 {
             self.vel_x = 0.0;
         } else {
-            let target = if input.run { RUN_SPEED } else { PLAYER_SPEED };
+            let target = if input.run && self.has_cape {
+                RUN_SPEED
+            } else {
+                PLAYER_SPEED
+            };
             // Speed measured along the direction being held. A standing start
             // reads as zero and a turn reads as negative, so both floor to
             // walking pace and the character never slides through a reversal.
@@ -1008,6 +1030,7 @@ impl Player {
     }
 
     pub fn reset(&mut self) {
+        self.has_cape = false;
         self.x = self.spawn_x;
         self.y = self.spawn_y;
         self.vel_x = 0.0;
@@ -1045,7 +1068,7 @@ impl Player {
     /// through the apex of the arc instead of flicking over the moment
     /// `vel_y` crosses zero.
     fn uses_fall_pose(&self) -> bool {
-        !self.on_ground && self.vel_y >= FALL_POSE_SPEED
+        self.has_cape && !self.on_ground && self.vel_y >= FALL_POSE_SPEED
     }
 
     pub fn render(
@@ -1076,9 +1099,7 @@ impl Player {
             // Dropping fast enough for the cape to catch (including the fall
             // onto a door's base height): the wide top-right pose, cape
             // trailing behind him.
-            _ if self.uses_fall_pose() => {
-                (FALL_SRC_X, 0, FALL_FRAME_WIDTH, FALL_HEAD_CENTER_X)
-            }
+            _ if self.uses_fall_pose() => (FALL_SRC_X, 0, FALL_FRAME_WIDTH, FALL_HEAD_CENTER_X),
             // Idle, or one of the two ground cycles (also used while rising,
             // and while walking towards a door during the exit sequence).
             _ => {
@@ -1086,6 +1107,13 @@ impl Player {
                 (src_x, src_y, self.width, HEAD_CENTER_X)
             }
         };
+        // The bottom half of character.png stores the matching cape-free frames.
+        let src_y = src_y
+            + if self.has_cape {
+                0
+            } else {
+                (texture.query().height / 2) as i32
+            };
         let src_rect = sdl2::rect::Rect::new(src_x, src_y, frame_width, self.height);
 
         // Line the drawn head up with where the head sits in a normal frame, so
@@ -1308,7 +1336,10 @@ mod tests {
         for step in 0..5 {
             tilemap.update(FIXED_DT);
             player.update(&InputState::new(), &mut tilemap, FIXED_DT);
-            assert!(player.on_ground, "step {step}: should be riding the platform");
+            assert!(
+                player.on_ground,
+                "step {step}: should be riding the platform"
+            );
             assert_eq!(
                 player.airborne_steps, 0,
                 "step {step}: a platform underfoot should count as ground"
@@ -1332,8 +1363,14 @@ mod tests {
         player.kill();
         player.reset();
 
-        assert_eq!(player.steps_since_press, WINDOW_SPENT, "respawn kept a press");
-        assert_eq!(player.airborne_steps, WINDOW_SPENT, "respawn kept coyote time");
+        assert_eq!(
+            player.steps_since_press, WINDOW_SPENT,
+            "respawn kept a press"
+        );
+        assert_eq!(
+            player.airborne_steps, WINDOW_SPENT,
+            "respawn kept coyote time"
+        );
 
         // The first step after respawning must not launch him upward.
         player.update(&InputState::new(), &mut tilemap, FIXED_DT);
@@ -1378,12 +1415,10 @@ mod tests {
     /// legs until the run has actually ramped him past walking pace.
     #[test]
     fn gait_follows_speed_not_the_run_button() {
-        let mut tilemap = TileMap::from_data(vec![
-            vec![tiles::EMPTY; 10],
-            vec![tiles::SOLID; 10],
-        ]);
+        let mut tilemap = TileMap::from_data(vec![vec![tiles::EMPTY; 10], vec![tiles::SOLID; 10]]);
         // Stand him on the solid row so he is grounded and can move.
         let mut player = Player::new(16.0, TILE_SIZE - PLAYER_HEIGHT as f32);
+        player.equip_cape();
 
         let run_right = InputState {
             right: true,
@@ -1448,6 +1483,7 @@ mod tests {
     #[test]
     fn cape_pose_waits_for_real_falling_speed() {
         let mut player = Player::new(0.0, 0.0);
+        player.equip_cape();
         player.on_ground = false;
 
         // Rising, and the moment at the very top of the arc.
@@ -1466,13 +1502,19 @@ mod tests {
         // At and beyond the threshold the cape streams out.
         for vel_y in [FALL_POSE_SPEED, FALL_POSE_SPEED + 200.0] {
             player.vel_y = vel_y;
-            assert!(player.uses_fall_pose(), "vel_y = {vel_y}: cape should be out");
+            assert!(
+                player.uses_fall_pose(),
+                "vel_y = {vel_y}: cape should be out"
+            );
         }
 
         // Grounded never uses the falling pose, however large vel_y is.
         player.on_ground = true;
         player.vel_y = FALL_POSE_SPEED + 200.0;
-        assert!(!player.uses_fall_pose(), "grounded must not use the fall pose");
+        assert!(
+            !player.uses_fall_pose(),
+            "grounded must not use the fall pose"
+        );
     }
 
     /// The threshold is reached a short way into the fall, not many frames
@@ -1480,6 +1522,7 @@ mod tests {
     #[test]
     fn cape_pose_engages_shortly_after_the_apex() {
         let mut player = Player::new(0.0, 0.0);
+        player.equip_cape();
         player.on_ground = false;
         player.vel_y = 0.0;
 
@@ -1512,7 +1555,11 @@ mod tests {
     fn standing() -> (Player, TileMap) {
         let mut grid = vec![vec![tiles::EMPTY; 40]; 12];
         grid[4] = vec![tiles::SOLID; 40];
-        (Player::new(400.0, 122.0), TileMap::from_data(grid))
+        {
+            let mut player = Player::new(400.0, 122.0);
+            player.equip_cape();
+            (player, TileMap::from_data(grid))
+        }
     }
 
     /// Hold right (optionally with run) for `frames` and return the new `vel_x`.
@@ -1526,6 +1573,23 @@ mod tests {
             player.update(&input, tilemap, FIXED_DT);
         }
         player.vel_x
+    }
+
+    #[test]
+    fn running_requires_a_cape_and_reset_removes_it() {
+        let (mut player, mut tilemap) = standing();
+        player.reset();
+        assert!(!player.has_cape());
+        assert_eq!(hold_right(30, true, &mut player, &mut tilemap), PLAYER_SPEED);
+        player.vel_y = FALL_POSE_SPEED;
+        player.on_ground = false;
+        assert!(!player.uses_fall_pose());
+        player.equip_cape();
+        assert!(player.uses_fall_pose());
+        assert_eq!(hold_right(30, true, &mut player, &mut tilemap), RUN_SPEED);
+        player.reset();
+        assert!(!player.has_cape());
+        assert_eq!(hold_right(30, true, &mut player, &mut tilemap), PLAYER_SPEED);
     }
 
     #[test]
@@ -1928,7 +1992,10 @@ mod tests {
                 player.update(&input, &mut tilemap, dt);
                 let gap = player.y - block_bottom; // player's top below the block
 
-                assert!(!player.is_dead(), "hold={hold_jump} frame {frame}: must not die");
+                assert!(
+                    !player.is_dead(),
+                    "hold={hold_jump} frame {frame}: must not die"
+                );
                 // The upward jump is gone immediately and never returns.
                 assert!(
                     player.vel_y >= -0.01,
